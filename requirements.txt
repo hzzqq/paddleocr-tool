@@ -1,0 +1,16 @@
+# PaddleOCR 批量图文抽取工具 —— 依赖清单
+# 安装：pip install -r requirements.txt
+
+# 主后端（体积较大，未随轻量依赖一起装；详见 README 降级说明）
+paddleocr
+paddlepaddle
+
+# 兜底后端（tesseract 模式需要）
+pytesseract
+Pillow
+
+# PDF 转图（可选，poppler 不可用时会跳过 PDF）
+pdf2image
+
+# Web 界面（可选，运行 ui.py 需要）
+streamlit

@@ -1,0 +1,7 @@
+__pycache__/
+*.py[cod]
+.env
+_smoke/
+results.json
+results.csv
+*.md.bak

@@ -1,0 +1,2 @@
+本目录为 PaddleOCR 批量图文抽取工具 MVP。
+运行示例：python ocr_tool.py --input . --output ./_smoke --mock
