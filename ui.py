@@ -12,6 +12,7 @@ PaddleOCR 批量图文抽取工具 —— Streamlit Web 界面（可选）
 """
 
 import json
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -59,12 +60,33 @@ if start:
         if use_mock:
             cmd.append("--mock")
 
-        progress = st.progress(0, text="正在识别，请稍候……")
-        with st.spinner("识别中"):
-            proc = subprocess.run(cmd, capture_output=True, text=True)
-        progress.progress(100, text="完成")
+        log_box = st.empty()
+        progress = st.progress(0, text="准备中…")
+        lines_seen = []
+        # 用 Popen 逐行读取子进程输出，实现真实流式进度（而非一次性阻塞）
+        proc = subprocess.Popen(
+            cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            text=True, bufsize=1,
+        )
+        total = 0
+        done = 0
+        while True:
+            line = proc.stdout.readline()
+            if not line:
+                if proc.poll() is not None:
+                    break
+                continue
+            lines_seen.append(line.rstrip("\n"))
+            log_box.code("\n".join(lines_seen[-200:]), language="text")
+            m = re.search(r"\[进度\].*?(\d+)/(\d+)", line)
+            if m:
+                done, total = int(m.group(1)), int(m.group(2))
+                if total:
+                    progress.progress(min(done / total, 1.0), text=f"识别中 {done}/{total}")
+        proc.wait()
+        progress.progress(1.0, text="完成")
         st.subheader("运行日志")
-        st.code(proc.stdout + proc.stderr, language="text")
+        log_box.code("\n".join(lines_seen), language="text")
 
         if proc.returncode != 0:
             st.error("识别失败，请查看上方日志。")
@@ -76,15 +98,22 @@ if start:
                 if rj.exists():
                     data = json.loads(rj.read_text(encoding="utf-8"))
                     ok = sum(1 for d in data if d.get("status") == "ok")
-                    c1, c2, c3 = st.columns(3)
-                    c1.metric("成功文件", ok)
-                    c2.metric("总文件", len(data))
-                    c3.metric("输出目录", output_dir)
+                    skp = sum(1 for d in data if d.get("status") == "skipped_pdf")
+                    err = sum(1 for d in data if d.get("status") == "error")
+                    c1, c2, c3, c4 = st.columns(4)
+                    c1.metric("成功", ok)
+                    c2.metric("跳过", skp)
+                    c3.metric("失败", err)
+                    c4.metric("总计", len(data))
 
-                    st.subheader("逐文件结果预览")
+                    # 状态徽章着色，一眼区分 ok / 跳过 / 失败
+                    badge = {"ok": "🟢", "skipped_pdf": "🟡", "error": "🔴"}
+                    st.subheader("逐文件结果")
                     for item in data:
+                        sts = item.get("status", "")
+                        icon = badge.get(sts, "⚪")
                         name = Path(item["file"]).name
-                        with st.expander(f"{name} （{item['elapsed']}s / {item['status']}）"):
+                        with st.expander(f"{icon} {name} （{item['elapsed']}s / {sts}）"):
                             st.text(item.get("text", "") or "（无识别结果）")
 
                 st.subheader("结果文件下载")

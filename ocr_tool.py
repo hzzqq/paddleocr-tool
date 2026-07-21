@@ -80,18 +80,17 @@ def collect_files(input_path, recursive):
     """
     p = Path(input_path)
     files = []
-    skipped_pdf = []
     if p.is_file():
         ext = p.suffix.lower()
         if ext in IMAGE_EXTS or ext in PDF_EXTS:
             files.append(p)
         else:
             print(f"[跳过] 不支持的文件类型：{p}")
-        return files, skipped_pdf
+        return files, []
 
     if not p.is_dir():
         print(f"[错误] 输入路径不存在：{input_path}")
-        return files, skipped_pdf
+        return files, []
 
     # 目录：按扩展名收集
     pattern = "**/*" if recursive else "*"
@@ -106,7 +105,7 @@ def collect_files(input_path, recursive):
         elif ext in PDF_EXTS:
             files.append(f)
         # 其他类型忽略
-    return files, skipped_pdf
+    return files, []
 
 
 def load_paddle_backend():
