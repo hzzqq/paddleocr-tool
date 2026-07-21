@@ -21,6 +21,7 @@ import csv
 import json
 import os
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -142,21 +143,41 @@ def pdf_to_images(pdf_path):
         return None
 
 
+# PaddleOCR 识别器懒加载单例：避免每张图都重建（原实现每图 new 一次，
+# 多图/并行时是明显性能悬崖），并用锁保证多线程下复用安全。
+_paddle_lock = threading.Lock()
+_paddle_recognizer = None
+
+
 def recognize_paddle(recognizer_cls, image_input, lang, min_conf=0.0):
     """用 PaddleOCR 识别单张图片（image_input 可为路径或 PIL.Image）。
 
+    recognizer_cls：PaddleOCR 类（由 build_recognizer 传入）。
+    内部以「懒加载单例 + 锁」复用同一个识别器实例，既消除逐图重建的
+    性能悬崖，又用锁保证 ThreadPoolExecutor 并行时不会并发踩同一实例。
     min_conf：最低置信度阈值（0~1），低于该值的识别行将被丢弃（仅 paddle 生效）。
     """
-    # PaddleOCR 实例化较重，调用方应缓存；这里每次新建以保持简单
-    ocr = recognizer_cls(use_angle_cls=True, lang=lang)
-    if hasattr(image_input, "save"):  # PIL.Image
+    global _paddle_recognizer
+    with _paddle_lock:
+        if _paddle_recognizer is None:
+            _paddle_recognizer = recognizer_cls(use_angle_cls=True, lang=lang)
+        ocr = _paddle_recognizer
+
+    if hasattr(image_input, "save"):  # PIL.Image（来自 PDF 转图）
         import tempfile
         tmp = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
         image_input.save(tmp.name)
         img_path = tmp.name
     else:
         img_path = str(image_input)
-    result = ocr.ocr(img_path, cls=True)
+    try:
+        result = ocr.ocr(img_path, cls=True)
+    finally:
+        if hasattr(image_input, "save"):
+            try:
+                os.unlink(img_path)
+            except OSError:
+                pass
     lines = []
     if result and result[0]:
         for line in result[0]:
@@ -166,11 +187,6 @@ def recognize_paddle(recognizer_cls, image_input, lang, min_conf=0.0):
             if min_conf and conf < min_conf:
                 continue
             lines.append(text)
-    if hasattr(image_input, "save"):
-        try:
-            os.unlink(img_path)
-        except OSError:
-            pass
     return "\n".join(lines)
 
 
@@ -286,8 +302,29 @@ def write_outputs(results, output_dir, fmt):
         for r in results:
             write_markdown(r, output_dir)
 
+    # 始终写出人类可读的汇总（新产物：一眼看清本次跑批结果）
+    summary_path = output_dir / "summary.txt"
+    ok = sum(1 for r in results if r["status"] == "ok")
+    skipped = sum(1 for r in results if r["status"] == "skipped_pdf")
+    errored = sum(1 for r in results if r["status"] == "error")
+    total_chars = sum(len(r["text"]) for r in results)
+    total_time = round(sum(r["elapsed"] for r in results), 3)
+    summary_lines = [
+        "PaddleOCR 批量图文抽取 · 运行汇总",
+        f"时间：{time.strftime('%Y-%m-%d %H:%M:%S')}",
+        f"文件总数：{len(results)}",
+        f"  成功(ok)：{ok}",
+        f"  跳过 PDF(skipped_pdf)：{skipped}",
+        f"  失败(error)：{errored}",
+        f"识别字符总数：{total_chars}",
+        f"耗时合计：{total_time}s",
+        f"输出格式：{fmt}",
+    ]
+    summary_path.write_text("\n".join(summary_lines) + "\n", encoding="utf-8")
+
     print(f"[完成] 已写出：{json_path}")
     print(f"[完成] 已写出：{csv_path}")
+    print(f"[完成] 已写出汇总：{summary_path}")
     if fmt == "md":
         print(f"[完成] 已写出逐文件 .md 到：{output_dir}")
 
