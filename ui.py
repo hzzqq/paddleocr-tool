@@ -36,6 +36,8 @@ with st.sidebar:
     workers = st.number_input("并行线程数", min_value=1, max_value=8, value=1, step=1)
     min_conf = st.slider("最低置信度（仅 paddle 生效）", 0.0, 1.0, 0.0, 0.05)
     use_mock = st.checkbox("Mock 模式（无需 OCR 依赖，演示流程）", value=False)
+    combine = st.checkbox("合并输出（生成 _combined.md/.txt）", value=False)
+    dry_run = st.checkbox("仅预检（统计待处理文件，不执行 OCR）", value=False)
 
     start = st.button("开始识别", type="primary")
 
@@ -60,6 +62,10 @@ if start:
             cmd.append("--recursive")
         if use_mock:
             cmd.append("--mock")
+        if combine:
+            cmd.append("--combine")
+        if dry_run:
+            cmd.append("--dry-run")
 
         log_box = st.empty()
         progress = st.progress(0, text="准备中…")
@@ -97,25 +103,31 @@ if start:
             if out.exists():
                 rj = out / "results.json"
                 if rj.exists():
-                    data = json.loads(rj.read_text(encoding="utf-8"))
-                    ok = sum(1 for d in data if d.get("status") == "ok")
-                    skp = sum(1 for d in data if d.get("status") == "skipped_pdf")
-                    err = sum(1 for d in data if d.get("status") == "error")
-                    c1, c2, c3, c4 = st.columns(4)
-                    c1.metric("成功", ok)
-                    c2.metric("跳过", skp)
-                    c3.metric("失败", err)
-                    c4.metric("总计", len(data))
+                    # 防御性解析：结果文件可能为空 / 损坏，避免 Streamlit 崩溃
+                    try:
+                        data = json.loads(rj.read_text(encoding="utf-8"))
+                    except (json.JSONDecodeError, OSError) as e:
+                        st.error(f"结果文件解析失败：{e}")
+                        data = []
+                    if data:
+                        ok = sum(1 for d in data if d.get("status") == "ok")
+                        skp = sum(1 for d in data if d.get("status") == "skipped_pdf")
+                        err = sum(1 for d in data if d.get("status") == "error")
+                        c1, c2, c3, c4 = st.columns(4)
+                        c1.metric("成功", ok)
+                        c2.metric("跳过", skp)
+                        c3.metric("失败", err)
+                        c4.metric("总计", len(data))
 
-                    # 状态徽章着色，一眼区分 ok / 跳过 / 失败
-                    badge = {"ok": "🟢", "skipped_pdf": "🟡", "error": "🔴"}
-                    st.subheader("逐文件结果")
-                    for item in data:
-                        sts = item.get("status", "")
-                        icon = badge.get(sts, "⚪")
-                        name = Path(item["file"]).name
-                        with st.expander(f"{icon} {name} （{item['elapsed']}s / {sts}）"):
-                            st.text(item.get("text", "") or "（无识别结果）")
+                        # 状态徽章着色，一眼区分 ok / 跳过 / 失败
+                        badge = {"ok": "🟢", "skipped_pdf": "🟡", "error": "🔴"}
+                        st.subheader("逐文件结果")
+                        for item in data:
+                            sts = item.get("status", "")
+                            icon = badge.get(sts, "⚪")
+                            name = Path(item.get("file", "")).name
+                            with st.expander(f"{icon} {name} （{item.get('elapsed', 0)}s / {sts}）"):
+                                st.text(item.get("text", "") or "（无识别结果）")
 
                 st.subheader("结果文件下载")
                 files = sorted(out.rglob("*")) if recursive else sorted(out.glob("*"))
