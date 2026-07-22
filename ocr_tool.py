@@ -58,8 +58,8 @@ def parse_args(argv=None):
                         help="输出目录")
     parser.add_argument("--lang", default="ch",
                         help="识别语言，默认 ch（中文）。tesseract 可用 chi_sim 等")
-    parser.add_argument("--format", choices=["md", "json", "csv"],
-                        default="md", help="输出格式，默认 md")
+    parser.add_argument("--format", choices=["md", "json", "csv", "txt"],
+                        default="md", help="输出格式，默认 md（txt 为逐文件纯文本）")
     parser.add_argument("--recursive", action="store_true",
                         help="递归遍历子目录")
     parser.add_argument("--backend", choices=["paddle", "tesseract"],
@@ -239,6 +239,7 @@ def process_file(file_path, recognizer, backend_name):
     """
     ext = file_path.suffix.lower()
     start = time.time()
+    error_msg = ""
     try:
         if ext in PDF_EXTS:
             images = pdf_to_images(file_path)
@@ -246,8 +247,10 @@ def process_file(file_path, recognizer, backend_name):
                 return {
                     "file": str(file_path),
                     "text": "",
+                    "chars": 0,
                     "elapsed": round(time.time() - start, 3),
                     "status": "skipped_pdf",
+                    "error": "",
                 }
             pages = []
             for idx, img in enumerate(images, 1):
@@ -259,13 +262,16 @@ def process_file(file_path, recognizer, backend_name):
     except Exception as e:
         text = ""
         status = "error"
+        error_msg = str(e)
         print(f"[错误] 处理失败 {file_path}：{e}")
     elapsed = round(time.time() - start, 3)
     return {
         "file": str(file_path),
         "text": text,
+        "chars": len(text),
         "elapsed": elapsed,
         "status": status,
+        "error": error_msg,
     }
 
 
@@ -274,9 +280,21 @@ def write_markdown(result, output_dir):
     src = Path(result["file"])
     out_name = src.stem + ".md"
     out_path = Path(output_dir) / out_name
-    header = f"# {src.name}\n\n> 耗时：{result['elapsed']}s　状态：{result['status']}\n\n"
+    meta = f"耗时：{result['elapsed']}s　状态：{result['status']}　字符数：{result['chars']}"
+    if result.get("error"):
+        meta += f"\n> 错误：{result['error']}"
+    header = f"# {src.name}\n\n> {meta}\n\n"
     body = result["text"] if result["text"] else "（无识别结果）"
     out_path.write_text(header + body + "\n", encoding="utf-8")
+    return out_path
+
+
+def write_text(result, output_dir):
+    """写入单个文件的 .txt 纯文本结果（--format txt）。"""
+    src = Path(result["file"])
+    out_name = src.stem + ".txt"
+    out_path = Path(output_dir) / out_name
+    out_path.write_text(result["text"] + "\n", encoding="utf-8")
     return out_path
 
 
@@ -291,15 +309,20 @@ def write_outputs(results, output_dir, fmt):
     with open(json_path, "w", encoding="utf-8") as f:
         json.dump(results, f, ensure_ascii=False, indent=2)
     with open(csv_path, "w", encoding="utf-8-sig", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=["file", "text", "elapsed", "status"])
+        writer = csv.DictWriter(
+            f, fieldnames=["file", "text", "chars", "elapsed", "status", "error"]
+        )
         writer.writeheader()
         for r in results:
             writer.writerow(r)
 
-    # 按用户指定格式写出逐文件 md
+    # 按用户指定格式写出逐文件结果
     if fmt == "md":
         for r in results:
             write_markdown(r, output_dir)
+    elif fmt == "txt":
+        for r in results:
+            write_text(r, output_dir)
 
     # 始终写出人类可读的汇总（新产物：一眼看清本次跑批结果）
     summary_path = output_dir / "summary.txt"

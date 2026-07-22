@@ -81,3 +81,45 @@ def test_recognize_paddle_min_conf_filter():
     ocr_tool._paddle_recognizer = None
     out = ocr_tool.recognize_paddle(_LowConfOCR, "x.png", "ch", min_conf=0.5)
     assert out == ""
+
+
+def test_process_file_captures_error_and_chars():
+    """隐性问题修复验证：处理异常应被捕获并写入 error 字段，同时记录 chars。"""
+    def boom(img):
+        raise ValueError("识别引擎炸了")
+
+    res = ocr_tool.process_file(Path("x.png"), boom, "mock")
+    assert res["status"] == "error"
+    assert res["error"] == "识别引擎炸了"
+    assert res["chars"] == 0
+    assert res["elapsed"] >= 0
+
+
+def test_write_outputs_txt_format(tmp_path):
+    """R1 新需求：--format txt 应写出逐文件纯文本。"""
+    results = [
+        {"file": "a.png", "text": "你好世界", "chars": 4,
+         "elapsed": 0.1, "status": "ok", "error": ""}
+    ]
+    ocr_tool.write_outputs(results, str(tmp_path), "txt")
+    txt = (tmp_path / "a.txt").read_text(encoding="utf-8")
+    assert txt == "你好世界\n"
+    # json / csv / summary 仍应生成
+    assert (tmp_path / "results.json").exists()
+    assert (tmp_path / "results.csv").exists()
+    assert (tmp_path / "summary.txt").exists()
+
+
+def test_write_outputs_csv_includes_chars_and_error(tmp_path):
+    """可观测性：csv 表头应含 chars/error 字段。"""
+    results = [
+        {"file": "a.png", "text": "hi", "chars": 2,
+         "elapsed": 0.1, "status": "ok", "error": ""},
+        {"file": "b.png", "text": "", "chars": 0,
+         "elapsed": 0.0, "status": "error", "error": "boom"},
+    ]
+    ocr_tool.write_outputs(results, str(tmp_path), "md")
+    csv_text = (tmp_path / "results.csv").read_text(encoding="utf-8-sig")
+    assert "chars" in csv_text.splitlines()[0]
+    assert "error" in csv_text.splitlines()[0]
+    assert "boom" in csv_text
