@@ -227,3 +227,23 @@ def test_main_combine_and_workers_cap(tmp_path, capsys):
     assert (out / "results.json").exists()
     out_text = capsys.readouterr().out
     assert "安全上限" in out_text  # workers 被钳制提示
+
+
+def test_main_skip_existing(tmp_path, capsys):
+    """R1 新需求验证：--skip-existing 跳过已有结果文件，实现断点续跑。"""
+    img = tmp_path / "a.png"
+    img.write_bytes(b"fake")
+    out = tmp_path / "out"
+    rc1 = ocr_tool.main(["--input", str(img), "--output", str(out), "--mock"])
+    assert rc1 == 0
+    assert (out / "a.md").exists()
+    # 第二次运行应跳过（不报错、不覆盖）
+    rc2 = ocr_tool.main([
+        "--input", str(img), "--output", str(out), "--mock", "--skip-existing",
+    ])
+    assert rc2 == 0
+    assert (out / "a.md").exists()
+    out_text = capsys.readouterr().out
+    assert "跳过" in out_text or "已存在" in out_text
+    # 全部跳过时不应 overwrite 成空结果
+    assert (out / "results.json").exists()

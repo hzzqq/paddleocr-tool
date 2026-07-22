@@ -78,6 +78,8 @@ def parse_args(argv=None):
                         help="最低置信度阈值（仅 paddle 后端生效，0~1，低于则丢弃该行）")
     parser.add_argument("--combine", action="store_true",
                         help="额外输出一个合并文件（_combined.md / .txt），把所有成功结果按序拼接，便于下游一次性消费")
+    parser.add_argument("--skip-existing", action="store_true",
+                        help="跳过已有输出结果的文件（按格式判断），便于断点续跑 / 增量重试，避免重复 OCR")
     return parser.parse_args(argv)
 
 
@@ -433,6 +435,18 @@ def write_outputs(results, output_dir, fmt, combine=False):
         print(f"[完成] 已写出逐文件 .md 到：{output_dir}")
 
 
+def _output_exists(output_dir, file_path, fmt):
+    """判断某文件的识别结果是否已存在（用于 --skip-existing 续跑）。
+
+    md/txt 看对应逐文件产物；json/csv 以整批 results.json 作为完成标记。
+    """
+    out = Path(output_dir)
+    stem = Path(file_path).stem
+    if fmt in ("md", "txt"):
+        return (out / f"{stem}.{fmt}").exists()
+    return (out / "results.json").exists()
+
+
 def main(argv=None):
     args = parse_args(argv)
     # 安全护栏：限制并行线程数，避免 --workers 过大耗尽系统资源
@@ -453,6 +467,21 @@ def main(argv=None):
         Path(args.output).mkdir(parents=True, exist_ok=True)
         write_outputs([], args.output, args.format)
         return 0
+
+    # 断点续跑：跳过已有结果的文件（避免重复 OCR 浪费）
+    if args.skip_existing:
+        kept, already = [], []
+        for f in files:
+            if _output_exists(args.output, f, args.format):
+                already.append(f)
+            else:
+                kept.append(f)
+        files = kept
+        if already:
+            print(f"[提示] 跳过 {len(already)} 个已存在结果的文件（--skip-existing）")
+        if not files:
+            print("✅ 全部文件已有识别结果，无需重复处理。")
+            return 0
 
     if args.dry_run:
         # 预检模式：只统计待处理文件，不执行 OCR（新能力 + 可观测性）
