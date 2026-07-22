@@ -267,6 +267,37 @@ def test_process_file_aggregates_confidence(tmp_path):
     assert res["min_conf"] == 0.7
 
 
+def test_process_file_empty_marked_not_ok(tmp_path):
+    """R2 修复验证：识别不到任何字（空文本、无异常）应标记为 empty，而非 ok。"""
+    from pathlib import Path as _P
+
+    f = _P(tmp_path / "blank.png")
+    f.write_bytes(b"fake")
+    res = ocr_tool.process_file(f, lambda p: ("", None), "fake")
+    assert res["status"] == "empty"  # 此前会被误记为 ok
+    assert res["chars"] == 0
+
+
+def test_apply_min_chars_filters_noise():
+    """R1 新需求验证：--min-chars 把过短的成功结果标记为 filtered。"""
+    results = [
+        {"file": "a.png", "text": "你好世界", "chars": 4, "status": "ok", "elapsed": 0.1},
+        {"file": "b.png", "text": "x", "chars": 1, "status": "ok", "elapsed": 0.1},
+        {"file": "c.png", "text": "", "chars": 0, "status": "empty", "elapsed": 0.0},
+    ]
+    filtered = ocr_tool.apply_min_chars(results, 3)
+    assert results[0]["status"] == "ok"      # 4 字，保留
+    assert results[1]["status"] == "filtered"  # 1 字，被过滤
+    assert results[2]["status"] == "empty"    # 已是 empty，不受影响
+    assert len(filtered) == 1
+
+
+def test_apply_min_chars_noop_when_zero():
+    results = [{"file": "a.png", "text": "x", "chars": 1, "status": "ok"}]
+    assert ocr_tool.apply_min_chars(results, 0) == []
+    assert results[0]["status"] == "ok"
+
+
 def test_main_emits_confidence_field(tmp_path):
     """置信度字段进入 results.json（mock 后端无可置信度时为 None）。"""
     import json as _json

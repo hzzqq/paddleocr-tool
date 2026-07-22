@@ -87,6 +87,8 @@ def parse_args(argv=None):
                         help="静默模式：不打印逐文件进度，仅输出关键结果与错误（适合脚本/流水线）")
     parser.add_argument("--include", default=None,
                         help="文件名过滤：只处理文件名匹配该子串或 glob 模式（如 '*page*' 或 '封面'）的文件")
+    parser.add_argument("--min-chars", type=int, default=0,
+                        help="识别字符数低于该值的「成功」结果标记为 filtered（噪声过滤，不计入成功数/合并）")
     return parser.parse_args(argv)
 
 
@@ -350,6 +352,11 @@ def process_file(file_path, recognizer, backend_name):
         status = "error"
         error_msg = str(e)
         print(f"[错误] 处理失败 {file_path}：{e}")
+    # R2 修复（隐性可观测性缺陷）：原本空文本（识别不到任何字，但无异常）
+    # 也会标记为 ok 并计入「成功」，污染 ok 计数与合并文件。现显式标记为
+    # "empty"，既不计入成功也不进入合并，便于发现「识别失败但没报错」的情况。
+    if not text and status == "ok":
+        status = "empty"
     elapsed = round(time.time() - start, 3)
     avg_conf = round(sum(file_confs) / len(file_confs), 3) if file_confs else None
     min_conf_out = round(min(file_confs), 3) if file_confs else None
@@ -516,6 +523,23 @@ def _output_exists(output_dir, file_path, fmt):
     return (out / "results.json").exists()
 
 
+def apply_min_chars(results, min_chars: int) -> list:
+    """按 --min-chars 过滤噪声结果。
+
+    R1 新能力：识别字符数低于阈值的「成功」结果标记为 filtered，
+    既不计入 ok 成功数、也不进入合并文件，避免极短噪声（如空白页、
+    水印误识）混入产出。返回被过滤的结果列表，供调用方提示。
+    """
+    filtered = []
+    if not min_chars or min_chars <= 0:
+        return filtered
+    for r in results:
+        if r.get("status") == "ok" and (r.get("chars") or 0) < min_chars:
+            r["status"] = "filtered"
+            filtered.append(r)
+    return filtered
+
+
 def collect_low_conf(results, threshold: float) -> list:
     """收集平均置信度低于阈值的结果（仅对有置信度信息的文件生效）。
 
@@ -613,6 +637,11 @@ def main(argv=None):
             results.append(res)
 
     write_outputs(results, args.output, args.format, combine=args.combine)
+    # R1 噪声过滤：低于 --min-chars 的成功结果标记 filtered（不计入成功/合并）
+    if args.min_chars > 0:
+        filtered = apply_min_chars(results, args.min_chars)
+        if filtered:
+            print(f"[提示] {len(filtered)} 个结果因识别字符数低于 {args.min_chars} 被标记为 filtered（不计入成功）")
     ok = sum(1 for r in results if r["status"] == "ok")
     print(f"[汇总] 成功 {ok}/{len(results)}，结果见：{args.output}")
 
