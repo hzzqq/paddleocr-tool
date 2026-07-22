@@ -112,6 +112,8 @@ def parse_args(argv=None):
                         help="识别字符数低于该值的「成功」结果标记为 filtered（噪声过滤，不计入成功数/合并）")
     parser.add_argument("--max-files", type=int, default=0,
                         help="最多处理的文件数（0 表示不限制），便于对大目录做抽样 / 试跑")
+    parser.add_argument("--sort", choices=["name", "size"], default="name",
+                        help="处理顺序：name=按文件名字典序（默认，确定性）；size=按体积降序（大文件优先，利于并行吞吐）")
     parser.add_argument("--fail-on-error", action="store_true",
                         help="R1 新能力：任一文件识别失败时返回非零退出码（默认仍返回 0），便于 CI / 流水线把「部分失败」升级为构建失败")
     return parser.parse_args(argv)
@@ -167,6 +169,30 @@ def collect_files(input_path, recursive, include=None):
         else:
             skipped.append(f)  # 其他不支持类型
     return files, skipped
+
+
+def sort_files(files, mode: str = "name"):
+    """对收集到的文件列表排序，返回新列表（不修改入参）。
+
+    R1 新能力：大批量处理时控制遍历顺序。
+    - "name"（默认）：按路径名字典序，保证每次运行顺序一致、便于复现与调试；
+    - "size"：按文件体积降序，优先处理大文件，便于在并行场景下更早启动
+      耗时任务、提升整体吞吐（避免把大文件都留到最后）。
+    空列表安全返回空列表。
+    """
+    if not files:
+        return []
+    if mode == "size":
+        return sorted(files, key=lambda p: _safe_size(p), reverse=True)
+    # 默认按名称（确定性）
+    return sorted(files, key=lambda p: str(p))
+
+
+def _safe_size(p) -> int:
+    try:
+        return p.stat().st_size
+    except OSError:
+        return 0
 
 
 def collect_all(input_spec, recursive, include=None):
@@ -405,6 +431,12 @@ def process_file(file_path, recognizer, backend_name):
         status = "error"
         error_msg = str(e)
         print(f"[错误] 处理失败 {file_path}：{e}")
+    # R2 防护（隐性崩溃风险）：识别器可能返回 None 文本（如退化的自定义识别
+    # 函数、或某页返回 (None, None)），后续 `len(text)` 会抛 TypeError 直接
+    # 中断整批处理。统一规整为字符串，再交给下方「空文本 -> empty」逻辑处理，
+    # 避免单文件异常拖垮整个批处理流程。
+    if text is None:
+        text = ""
     # R2 修复（隐性可观测性缺陷）：原本空文本（识别不到任何字，但无异常）
     # 也会标记为 ok 并计入「成功」，污染 ok 计数与合并文件。现显式标记为
     # "empty"，既不计入成功也不进入合并，便于发现「识别失败但没报错」的情况。
@@ -684,6 +716,9 @@ def main(argv=None):
         skipped.extend(extra)
         print(f"[提示] --max-files {args.max_files}：仅处理前 {args.max_files} 个文件，"
               f"其余 {len(extra)} 个计入跳过。")
+
+    # R1 新能力：按 --sort 指定的顺序处理（默认 name 保证确定性；size 大文件优先）
+    files = sort_files(files, args.sort)
 
     if args.dry_run:
         # 预检模式：只统计待处理文件，不执行 OCR（新能力 + 可观测性）

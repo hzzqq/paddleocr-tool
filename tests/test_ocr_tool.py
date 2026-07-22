@@ -603,3 +603,36 @@ def test_collect_files_missing_path_reports_stderr(tmp_path, capsys):
     assert "输入路径不存在" not in captured.out
     # 退出码仍为 0（保持原有行为：无文件可处理也算正常收尾）
     assert rc == 0
+
+
+def test_sort_files_orders_by_name_and_size(tmp_path):
+    """R1：sort_files 按 name 字典序、按 size 降序正确排序，且不修改入参。"""
+    f1 = tmp_path / "b.png"
+    f2 = tmp_path / "a.png"
+    f3 = tmp_path / "c.png"
+    f1.write_bytes(b"x" * 100)
+    f2.write_bytes(b"x" * 10)
+    f3.write_bytes(b"x" * 50)
+    files = [f1, f2, f3]
+    by_name = ocr_tool.sort_files(files, "name")
+    assert [p.name for p in by_name] == ["a.png", "b.png", "c.png"]
+    by_size = ocr_tool.sort_files(files, "size")
+    assert [p.name for p in by_size] == ["b.png", "c.png", "a.png"]  # 体积 100/50/10
+    # 不修改原列表
+    assert [p.name for p in files] == ["b.png", "a.png", "c.png"]
+
+
+def test_sort_files_empty_is_safe():
+    assert ocr_tool.sort_files([], "name") == []
+    assert ocr_tool.sort_files([], "size") == []
+
+
+def test_process_file_none_text_does_not_crash(tmp_path):
+    """R2 防护验证：识别器返回 (None, None) 时不应抛 TypeError，
+    而应被规整为空文本并标记为 empty。"""
+    img = tmp_path / "x.png"
+    img.write_bytes(b"fake")
+    res = ocr_tool.process_file(img, lambda x: (None, None), "mock")
+    assert res["status"] == "empty"
+    assert res["chars"] == 0
+    assert res["text"] == ""
