@@ -765,3 +765,97 @@ def test_process_file_none_text_does_not_crash(tmp_path):
     assert res["status"] == "empty"
     assert res["chars"] == 0
     assert res["text"] == ""
+
+
+def test_summarize_statuses_counts_all_five(tmp_path):
+    """R2 修复验证：汇总应覆盖 ok/empty/filtered/error/skipped_pdf 五类状态，
+    而非只统计 ok/error（此前 empty/filtered 被漏算，误导质量判断）。"""
+    results = [
+        {"file": "a.png", "text": "x", "chars": 1, "status": "ok", "elapsed": 0.1},
+        {"file": "b.png", "text": "y", "chars": 1, "status": "ok", "elapsed": 0.1},
+        {"file": "c.png", "text": "", "chars": 0, "status": "empty", "elapsed": 0.0},
+        {"file": "d.png", "text": "z", "chars": 1, "status": "filtered", "elapsed": 0.1},
+        {"file": "e.pdf", "text": "", "chars": 0, "status": "skipped_pdf", "elapsed": 0.0},
+        {"file": "f.png", "text": "", "chars": 0, "status": "error", "elapsed": 0.0, "error": "boom"},
+    ]
+    s = ocr_tool.summarize_statuses(results)
+    assert s["total"] == 6
+    assert s["ok"] == 2
+    assert s["empty"] == 1
+    assert s["filtered"] == 1
+    assert s["skipped_pdf"] == 1
+    assert s["error"] == 1
+
+
+def test_filter_results_by_status():
+    """R1 新需求验证：--status-filter 的纯函数只保留指定状态。"""
+    results = [
+        {"file": "a.png", "text": "x", "status": "ok"},
+        {"file": "b.png", "text": "", "status": "empty"},
+        {"file": "c.png", "text": "z", "status": "filtered"},
+    ]
+    only_ok = ocr_tool.filter_results_by_status(results, ["ok"])
+    assert [r["file"] for r in only_ok] == ["a.png"]
+    ok_empty = ocr_tool.filter_results_by_status(results, ["ok", "empty"])
+    assert {r["file"] for r in ok_empty} == {"a.png", "b.png"}
+    # 空过滤条件应原样返回全部
+    assert ocr_tool.filter_results_by_status(results, None) == results
+    assert ocr_tool.filter_results_by_status(results, []) == results
+
+
+def test_write_outputs_stats_includes_empty_filtered(tmp_path):
+    """R2 修复验证：stats.json 与 summary.txt 应呈现 empty/filtered 计数。"""
+    import json as _json
+
+    results = [
+        {"file": "a.png", "text": "你好世界", "chars": 4, "elapsed": 0.2,
+         "status": "ok", "error": "", "avg_conf": 0.9, "min_conf": 0.8},
+        {"file": "b.png", "text": "", "chars": 0, "elapsed": 0.0,
+         "status": "empty", "error": "", "avg_conf": None, "min_conf": None},
+        {"file": "c.png", "text": "短", "chars": 1, "elapsed": 0.1,
+         "status": "filtered", "error": ""},
+    ]
+    ocr_tool.write_outputs(results, str(tmp_path), "md")
+    stats = _json.loads((tmp_path / "stats.json").read_text(encoding="utf-8"))
+    assert stats["empty"] == 1
+    assert stats["filtered"] == 1
+    assert stats["ok"] == 1
+    summary = (tmp_path / "summary.txt").read_text(encoding="utf-8")
+    assert "空白(empty)：1" in summary
+    assert "噪声(filtered)：1" in summary
+
+
+def test_main_status_filter_limits_per_file_output(tmp_path, capsys):
+    """R1 新需求端到端：--status-filter ok 只写出成功结果的逐文件产物，
+    empty/filtered 文件无对应 .md，但 results.json 仍含全部结果。"""
+    import json as _json
+
+    (tmp_path / "a.png").write_bytes(b"x")
+    (tmp_path / "b.png").write_bytes(b"x")
+    out = tmp_path / "out"
+    rc = ocr_tool.main([
+        "--input", str(tmp_path), "--output", str(out), "--mock",
+        "--min-chars", "9999", "--status-filter", "ok",
+    ])
+    assert rc == 0
+    data = _json.loads((out / "results.json").read_text(encoding="utf-8"))
+    # 全量审计：mock 文本较短，全部被标 filtered，但因 status-filter=ok 不写逐文件产物
+    assert all(d["status"] == "filtered" for d in data)
+    assert not (out / "a.md").exists()
+    assert not (out / "b.md").exists()
+    assert (out / "stats.json").exists()  # 审计信息仍保留
+    out_text = capsys.readouterr().out
+    assert "status-filter" in out_text or "仅写出" in out_text
+
+
+def test_write_combined_respects_status_filter(tmp_path):
+    """R1 新需求验证：--status-filter 下合并文件只含指定状态。"""
+    results = [
+        {"file": "a.png", "text": "成功一", "chars": 3, "status": "ok", "error": ""},
+        {"file": "b.png", "text": "成功二", "chars": 3, "status": "ok", "error": ""},
+        {"file": "c.png", "text": "被过滤", "chars": 3, "status": "filtered", "error": ""},
+    ]
+    path = ocr_tool.write_combined(results, str(tmp_path), "md", status_filter=["ok"])
+    txt = path.read_text(encoding="utf-8")
+    assert "成功一" in txt and "成功二" in txt
+    assert "c.png" not in txt and "被过滤" not in txt

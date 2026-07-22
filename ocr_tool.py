@@ -122,6 +122,9 @@ def parse_args(argv=None):
                         help="R1 新能力：任一文件识别失败时返回非零退出码（默认仍返回 0），便于 CI / 流水线把「部分失败」升级为构建失败")
     parser.add_argument("--retries", type=int, default=0,
                         help="R1 新能力：单文件/单页识别失败时的重试次数（默认 0 不重试），提升对瞬时错误的韧性")
+    parser.add_argument("--status-filter", default=None,
+                        help="R1 新能力：只把指定状态的结果写出逐文件/合并产物（逗号分隔，如 'ok' 或 'ok,empty'）；"
+                             "不影响 results.json/stats.json 的全量审计信息")
     return parser.parse_args(argv)
 
 
@@ -570,8 +573,11 @@ def write_text(result, output_dir):
     return out_path
 
 
-def write_combined(results, output_dir, fmt):
+def write_combined(results, output_dir, fmt, status_filter=None):
     """把所有成功结果按文件顺序拼接成单个合并文件，格式跟随 fmt。
+
+    status_filter：与 write_outputs 一致的状态过滤；为空 / None 时按默认
+    （status==ok 且有文本）合并。提供时仅合并指定状态的结果。
 
     合并文件格式：
     - md    -> _combined.md（以文件名作小标题）
@@ -588,7 +594,14 @@ def write_combined(results, output_dir, fmt):
     """
     out_dir = Path(output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    ok_results = [r for r in results if r.get("status") == "ok" and r.get("text")]
+    allowed = None
+    if status_filter:
+        allowed = {x.strip() for x in status_filter if x and x.strip()}
+    ok_results = [
+        r for r in results
+        if r.get("status") == "ok" and r.get("text")
+        and (allowed is None or r.get("status") in allowed)
+    ]
     if not ok_results:
         # R2 隐性问题：原本会写出一个只含换行的空 _combined 文件，
         # 误导用户「合并产物存在却有内容」。无成功结果时应跳过并提示。
@@ -624,10 +637,18 @@ def write_combined(results, output_dir, fmt):
     return path
 
 
-def write_outputs(results, output_dir, fmt, combine=False):
-    """根据格式写出结果文件。combine=True 时额外写出合并文件。"""
+def write_outputs(results, output_dir, fmt, combine=False, status_filter=None):
+    """根据格式写出结果文件。combine=True 时额外写出合并文件。
+
+    status_filter：可选状态集合（str 列表，如 ["ok"]）；仅这些状态的结果
+    会写出逐文件产物（md/txt/jsonl）与合并文件，便于「只导出成功结果 / 把
+    empty·filtered·error 留待重跑」。results.json / results.csv / summary.txt /
+    stats.json 始终写入全量结果，保证审计信息不被筛选影响。
+    """
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
+    # R1 新能力：逐文件产物与合并产物按状态过滤；审计类产物仍用全量结果
+    per_file_results = filter_results_by_status(results, status_filter)
 
     # 始终写出合并的 json 与 csv（便于下游消费）
     json_path = output_dir / "results.json"
@@ -643,26 +664,27 @@ def write_outputs(results, output_dir, fmt, combine=False):
         for r in results:
             writer.writerow(r)
 
-    # 按用户指定格式写出逐文件结果
+    # 按用户指定格式写出逐文件结果（受 status_filter 约束）
     if fmt == "md":
-        for r in results:
+        for r in per_file_results:
             write_markdown(r, output_dir)
     elif fmt == "txt":
-        for r in results:
+        for r in per_file_results:
             write_text(r, output_dir)
     elif fmt == "jsonl":
         # 每行一条 JSON，便于 grep/awk/jq 等行式工具与流式消费
         jsonl_path = output_dir / "results.jsonl"
         with open(jsonl_path, "w", encoding="utf-8") as f:
-            for r in results:
+            for r in per_file_results:
                 f.write(json.dumps(r, ensure_ascii=False) + "\n")
         print(f"[完成] 已写出：{jsonl_path}")
 
     # 始终写出人类可读的汇总（新产物：一眼看清本次跑批结果）
     summary_path = output_dir / "summary.txt"
-    ok = sum(1 for r in results if r["status"] == "ok")
-    skipped = sum(1 for r in results if r["status"] == "skipped_pdf")
-    errored = sum(1 for r in results if r["status"] == "error")
+    s = summarize_statuses(results)
+    ok = s["ok"]
+    skipped = s["skipped_pdf"]
+    errored = s["error"]
     total_chars = sum(len(r["text"]) for r in results)
     total_time = round(sum(r["elapsed"] for r in results), 3)
     summary_lines = [
@@ -670,6 +692,8 @@ def write_outputs(results, output_dir, fmt, combine=False):
         f"时间：{time.strftime('%Y-%m-%d %H:%M:%S')}",
         f"文件总数：{len(results)}",
         f"  成功(ok)：{ok}",
+        f"  空白(empty)：{s['empty']}",
+        f"  噪声(filtered)：{s['filtered']}",
         f"  跳过 PDF(skipped_pdf)：{skipped}",
         f"  失败(error)：{errored}",
         f"识别字符总数：{total_chars}",
@@ -683,8 +707,10 @@ def write_outputs(results, output_dir, fmt, combine=False):
     conf_vals = [r["avg_conf"] for r in results
                  if isinstance(r.get("avg_conf"), (int, float))]
     stats = {
-        "total": len(results),
+        "total": s["total"],
         "ok": ok,
+        "empty": s["empty"],
+        "filtered": s["filtered"],
         "skipped_pdf": skipped,
         "error": errored,
         "total_chars": total_chars,
@@ -700,7 +726,7 @@ def write_outputs(results, output_dir, fmt, combine=False):
 
     # 可选：合并输出（把全部成功结果按序拼接成单个文件）
     if combine:
-        write_combined(results, output_dir, fmt)
+        write_combined(per_file_results, output_dir, fmt, status_filter)
 
     print(f"[完成] 已写出：{json_path}")
     print(f"[完成] 已写出：{csv_path}")
@@ -736,6 +762,43 @@ def apply_min_chars(results, min_chars: int) -> list:
             r["status"] = "filtered"
             filtered.append(r)
     return filtered
+
+
+def summarize_statuses(results: list) -> dict:
+    """汇总各状态计数，供 summary.txt / stats.json 复用（R1 新能力 + R2 修复）。
+
+    原实现只在 summary/stats 里散落统计 ok / skipped_pdf / error 三类状态，
+    遗漏了 empty（识别不到字但无异常）与 filtered（低于 --min-chars 被过滤）
+    两类——这两类恰恰是「噪声比例」「待重跑清单」的关键信号，漏统计会误导
+    用户对本次跑批质量的判断（隐性可观测性缺口）。这里集中统计全部五类状态，
+    作为单一事实来源，避免多处计数口径不一致。
+    """
+    from collections import Counter
+
+    c = Counter(r.get("status") for r in results)
+    return {
+        "total": len(results),
+        "ok": c.get("ok", 0),
+        "empty": c.get("empty", 0),
+        "filtered": c.get("filtered", 0),
+        "error": c.get("error", 0),
+        "skipped_pdf": c.get("skipped_pdf", 0),
+    }
+
+
+def filter_results_by_status(results: list, statuses) -> list:
+    """按状态过滤结果（R1 新能力：--status-filter 的纯函数实现）。
+
+    仅保留 status 在 statuses 集合内的结果；statuses 为空 / None / 空列表时
+    原样返回全部。用于「只导出成功结果」「把 empty/filtered 留待重跑」等场景，
+    不影响 results.json / stats.json 中全量审计信息（那些仍保留所有结果）。
+    """
+    if not statuses:
+        return list(results)
+    allowed = {s.strip() for s in statuses if s and s.strip()}
+    if not allowed:
+        return list(results)
+    return [r for r in results if r.get("status") in allowed]
 
 
 def collect_low_conf(results, threshold: float) -> list:
@@ -869,7 +932,15 @@ def main(argv=None):
         filtered = apply_min_chars(results, args.min_chars)
         if filtered:
             print(f"[提示] {len(filtered)} 个结果因识别字符数低于 {args.min_chars} 被标记为 filtered（不计入成功）")
-    write_outputs(results, args.output, args.format, combine=args.combine)
+    # R1 新能力：--status-filter 只把指定状态写出逐文件/合并产物
+    status_filter = None
+    if args.status_filter:
+        status_filter = [s.strip() for s in args.status_filter.split(",") if s.strip()]
+        if not status_filter:
+            status_filter = None
+        else:
+            print(f"[提示] 仅写出状态为 {','.join(status_filter)} 的逐文件/合并产物（审计文件仍含全部结果）")
+    write_outputs(results, args.output, args.format, combine=args.combine, status_filter=status_filter)
     ok = sum(1 for r in results if r["status"] == "ok")
     errored = sum(1 for r in results if r["status"] == "error")
     print(f"[汇总] 成功 {ok}/{len(results)}，结果见：{args.output}")
