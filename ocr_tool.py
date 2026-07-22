@@ -234,6 +234,7 @@ def recognize_paddle(recognizer_cls, image_input, lang, min_conf=0.0):
             except OSError:
                 pass
     lines = []
+    confs = []
     if result and result[0]:
         for line in result[0]:
             # line 形如 [bbox, ('文本', 置信度)]
@@ -242,7 +243,9 @@ def recognize_paddle(recognizer_cls, image_input, lang, min_conf=0.0):
             if min_conf and conf < min_conf:
                 continue
             lines.append(text)
-    return "\n".join(lines)
+            confs.append(conf)
+    # 返回文本与逐行置信度，供下游审计/质量评估（不再丢弃置信度信息）
+    return "\n".join(lines), confs
 
 
 def recognize_tesseract(pytesseract, Image, image_input, lang):
@@ -253,13 +256,14 @@ def recognize_tesseract(pytesseract, Image, image_input, lang):
         img = Image.open(str(image_input))
     # tesseract 语言映射：ch -> chi_sim
     tlang = "chi_sim+eng" if lang in ("ch", "chi_sim") else lang
-    return pytesseract.image_to_string(img, lang=tlang)
+    return pytesseract.image_to_string(img, lang=tlang), None
 
 
 def recognize_mock(image_input, lang):
     """mock 模式：返回假文本，用于无依赖演示完整流程。"""
     name = getattr(image_input, "filename", str(image_input))
-    return f"[MOCK] 这是 {Path(str(name)).name} 的模拟识别文本（语言={lang}）。\n欢迎使用 PaddleOCR 批量图文抽取工具。"
+    return (f"[MOCK] 这是 {Path(str(name)).name} 的模拟识别文本（语言={lang}）。\n"
+            f"欢迎使用 PaddleOCR 批量图文抽取工具。", None)
 
 
 def build_recognizer(args):
@@ -296,6 +300,7 @@ def process_file(file_path, recognizer, backend_name):
     ext = file_path.suffix.lower()
     start = time.time()
     error_msg = ""
+    file_confs = []
     try:
         if ext in PDF_EXTS:
             images = pdf_to_images(file_path)
@@ -307,13 +312,20 @@ def process_file(file_path, recognizer, backend_name):
                     "elapsed": round(time.time() - start, 3),
                     "status": "skipped_pdf",
                     "error": "",
+                    "avg_conf": None,
+                    "min_conf": None,
                 }
             pages = []
             for idx, img in enumerate(images, 1):
-                pages.append(f"--- 第 {idx} 页 ---\n" + recognizer(img))
+                ptext, pconf = recognizer(img)
+                pages.append(f"--- 第 {idx} 页 ---\n" + ptext)
+                if pconf:
+                    file_confs.extend(pconf)
             text = "\n\n".join(pages)
         else:
-            text = recognizer(file_path)
+            text, fconf = recognizer(file_path)
+            if fconf:
+                file_confs.extend(fconf)
         status = "ok"
     except Exception as e:
         text = ""
@@ -321,6 +333,8 @@ def process_file(file_path, recognizer, backend_name):
         error_msg = str(e)
         print(f"[错误] 处理失败 {file_path}：{e}")
     elapsed = round(time.time() - start, 3)
+    avg_conf = round(sum(file_confs) / len(file_confs), 3) if file_confs else None
+    min_conf_out = round(min(file_confs), 3) if file_confs else None
     return {
         "file": str(file_path),
         "text": text,
@@ -328,6 +342,8 @@ def process_file(file_path, recognizer, backend_name):
         "elapsed": elapsed,
         "status": status,
         "error": error_msg,
+        "avg_conf": avg_conf,
+        "min_conf": min_conf_out,
     }
 
 
@@ -337,6 +353,8 @@ def write_markdown(result, output_dir):
     out_name = src.stem + ".md"
     out_path = Path(output_dir) / out_name
     meta = f"耗时：{result['elapsed']}s　状态：{result['status']}　字符数：{result['chars']}"
+    if result.get("avg_conf") is not None:
+        meta += f"　平均置信度：{result['avg_conf']}"
     if result.get("error"):
         meta += f"\n> 错误：{result['error']}"
     header = f"# {src.name}\n\n> {meta}\n\n"
@@ -390,7 +408,8 @@ def write_outputs(results, output_dir, fmt, combine=False):
         json.dump(results, f, ensure_ascii=False, indent=2)
     with open(csv_path, "w", encoding="utf-8-sig", newline="") as f:
         writer = csv.DictWriter(
-            f, fieldnames=["file", "text", "chars", "elapsed", "status", "error"]
+            f, fieldnames=["file", "text", "chars", "elapsed", "status",
+                           "error", "avg_conf", "min_conf"]
         )
         writer.writeheader()
         for r in results:

@@ -58,10 +58,11 @@ class _FakeOCR:
 def test_recognize_paddle_singleton_and_text():
     ocr_tool._paddle_recognizer = None
     before = _FakeOCR.instances
-    txt1 = ocr_tool.recognize_paddle(_FakeOCR, "fake1.png", "ch", min_conf=0.0)
-    txt2 = ocr_tool.recognize_paddle(_FakeOCR, "fake2.png", "ch", min_conf=0.0)
+    txt1, conf1 = ocr_tool.recognize_paddle(_FakeOCR, "fake1.png", "ch", min_conf=0.0)
+    txt2, conf2 = ocr_tool.recognize_paddle(_FakeOCR, "fake2.png", "ch", min_conf=0.0)
     assert txt1 == "你好世界"
     assert txt2 == "你好世界"
+    assert conf1 == [0.99]
     # 两次调用应复用同一识别器实例（单例），不重复构造
     assert _FakeOCR.instances - before == 1
 
@@ -79,8 +80,9 @@ class _LowConfOCR:
 
 def test_recognize_paddle_min_conf_filter():
     ocr_tool._paddle_recognizer = None
-    out = ocr_tool.recognize_paddle(_LowConfOCR, "x.png", "ch", min_conf=0.5)
+    out, conf = ocr_tool.recognize_paddle(_LowConfOCR, "x.png", "ch", min_conf=0.5)
     assert out == ""
+    assert conf == []
 
 
 def test_process_file_captures_error_and_chars():
@@ -247,3 +249,34 @@ def test_main_skip_existing(tmp_path, capsys):
     assert "跳过" in out_text or "已存在" in out_text
     # 全部跳过时不应 overwrite 成空结果
     assert (out / "results.json").exists()
+
+
+def test_process_file_aggregates_confidence(tmp_path):
+    """R1 新需求验证：识别器返回 (text, confs)，process_file 聚合 avg/min 置信度。"""
+    from pathlib import Path as _P
+
+    f = _P(tmp_path / "x.png")
+    f.write_bytes(b"fake")
+    # 假识别器返回文本 + 逐行置信度
+    def fake_recognizer(p):
+        return "hello world", [0.9, 0.8, 0.7]
+
+    res = ocr_tool.process_file(f, fake_recognizer, "fake")
+    assert res["status"] == "ok"
+    assert res["avg_conf"] == 0.8
+    assert res["min_conf"] == 0.7
+
+
+def test_main_emits_confidence_field(tmp_path):
+    """置信度字段进入 results.json（mock 后端无可置信度时为 None）。"""
+    import json as _json
+
+    img = tmp_path / "a.png"
+    img.write_bytes(b"fake")
+    out = tmp_path / "out"
+    rc = ocr_tool.main(["--input", str(img), "--output", str(out), "--mock"])
+    assert rc == 0
+    data = _json.loads((out / "results.json").read_text(encoding="utf-8"))
+    assert "avg_conf" in data[0]
+    assert data[0]["avg_conf"] is None  # mock 不产出置信度
+
