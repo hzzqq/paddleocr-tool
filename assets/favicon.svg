@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512" role="img" aria-label="paddleocr-tool icon">
+  <defs>
+    <linearGradient id="ocrGrad" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#6366f1"/>
+      <stop offset="1" stop-color="#3b82f6"/>
+    </linearGradient>
+  </defs>
+  <rect x="56" y="56" width="400" height="400" rx="112" ry="112" fill="url(#ocrGrad)"/>
+  <g fill="none" stroke="#ffffff" stroke-width="14" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M170 212 L170 170 L212 170"/>
+    <path d="M342 212 L342 170 L300 170"/>
+    <path d="M170 302 L170 342 L212 342"/>
+    <path d="M342 302 L342 342 L300 342"/>
+    <path d="M214 322 L256 182" stroke-width="20"/>
+    <path d="M256 182 L298 322" stroke-width="20"/>
+    <path d="M232 268 L280 268" stroke-width="20"/>
+  </g>
+</svg>
