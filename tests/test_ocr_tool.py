@@ -39,6 +39,30 @@ def test_collect_files_finds_images(tmp_path):
     assert ".hidden.png" not in names  # 隐藏文件跳过
 
 
+def test_collect_files_ext_filter(tmp_path):
+    """R1 新需求验证：--ext 只保留指定扩展名，覆盖默认图片/PDF 白名单。"""
+    (tmp_path / "a.png").write_bytes(b"\x89PNG")
+    (tmp_path / "b.jpg").write_bytes(b"\xff\xd8")
+    (tmp_path / "c.pdf").write_bytes(b"%PDF")
+    files, _ = ocr_tool.collect_files(str(tmp_path), recursive=False, exts=".png,.pdf")
+    names = {f.name for f in files}
+    assert names == {"a.png", "c.pdf"}
+    assert "b.jpg" not in names  # jpg 被 --ext 排除
+
+
+def test_collect_files_skips_hidden_dir(tmp_path):
+    """R2 隐性健壮性验证：隐藏目录（如 .git）内的文件不应被收集。"""
+    hidden = tmp_path / ".git"
+    hidden.mkdir()
+    (hidden / "config.png").write_bytes(b"\x89PNG")
+    (tmp_path / "keep.png").write_bytes(b"\x89PNG")
+    files, skipped = ocr_tool.collect_files(str(tmp_path), recursive=True)
+    names = {f.name for f in files}
+    assert "keep.png" in names
+    assert "config.png" not in names  # 位于隐藏目录内，应跳过
+    assert any(f.name == "config.png" for f in skipped)
+
+
 def _make_line(text, conf):
     # 真实 PaddleOCR 结构：result 是「行列表」，每行 = [bbox, (文本, 置信度)]
     return [[[0, 0], [1, 0], [1, 1], [0, 1]], (text, conf)]

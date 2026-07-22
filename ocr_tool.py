@@ -108,6 +108,8 @@ def parse_args(argv=None):
                         help="静默模式：不打印逐文件进度，仅输出关键结果与错误（适合脚本/流水线）")
     parser.add_argument("--include", default=None,
                         help="文件名过滤：只处理文件名匹配该子串或 glob 模式（如 '*page*' 或 '封面'）的文件")
+    parser.add_argument("--ext", default=None,
+                        help="扩展名过滤：只处理指定扩展名（逗号分隔，如 .png,.pdf），覆盖默认图片/PDF 白名单")
     parser.add_argument("--min-chars", type=int, default=0,
                         help="识别字符数低于该值的「成功」结果标记为 filtered（噪声过滤，不计入成功数/合并）")
     parser.add_argument("--max-files", type=int, default=0,
@@ -126,23 +128,27 @@ def _name_matches(name: str, include: str) -> bool:
     return include in name or fnmatch.fnmatch(name, include)
 
 
-def collect_files(input_path, recursive, include=None):
+def collect_files(input_path, recursive, include=None, exts=None):
     """收集需要处理的文件列表（图片 + PDF）。
 
-    返回 (文件列表, 跳过列表)。跳过列表包含不支持类型 / 隐藏文件 / 未命中 --include，便于调用方透明提示。
+    返回 (文件列表, 跳过列表)。跳过列表包含不支持类型 / 隐藏文件 / 隐藏目录 /
+    未命中 --include / 未命中 --ext，便于调用方透明提示。
+
+    exts：可选扩展名白名单（小写，含点），提供时覆盖默认 IMAGE/PDF 白名单，
+    仅处理落在该集合内的文件（R1 新能力，与 --include 的「文件名/子串」维度互补）。
     """
     p = Path(input_path)
     files = []
     skipped = []
+    if exts is not None:
+        exts = {e.strip().lower() for e in exts.split(",") if e.strip()}
+    allowed_exts = exts if exts is not None else (IMAGE_EXTS | PDF_EXTS)
     if p.is_file():
         ext = p.suffix.lower()
-        if ext in IMAGE_EXTS or ext in PDF_EXTS:
-            if _name_matches(p.name, include):
-                files.append(p)
-            else:
-                skipped.append(p)  # 不满足 --include
+        if ext in allowed_exts and _name_matches(p.name, include):
+            files.append(p)
         else:
-            skipped.append(p)  # 记录不支持的文件类型
+            skipped.append(p)  # 类型不支持 / 未命中过滤
         return files, skipped
 
     if not p.is_dir():
@@ -157,11 +163,18 @@ def collect_files(input_path, recursive, include=None):
     for f in sorted(p.glob(pattern)):
         if not f.is_file():
             continue
+        # R2 修复（隐性健壮性）：原实现只检查文件自身是否以点开头，漏掉了
+        # 「位于隐藏目录内」的文件（如 .git/xxx.png），会把这些无关文件也拉进
+        # OCR 批处理——既浪费算力，又可能把 .git 等目录中的敏感文件误识别。
+        # 现检查路径上任一层目录是否隐藏，命中则跳过。
+        if any(part.startswith(".") for part in f.relative_to(p).parts):
+            skipped.append(f)
+            continue
         if f.name.startswith("."):
             skipped.append(f)  # 隐藏文件
             continue
         ext = f.suffix.lower()
-        if ext in IMAGE_EXTS or ext in PDF_EXTS:
+        if ext in allowed_exts:
             if _name_matches(f.name, include):
                 files.append(f)
             else:
@@ -195,7 +208,7 @@ def _safe_size(p) -> int:
         return 0
 
 
-def collect_all(input_spec, recursive, include=None):
+def collect_all(input_spec, recursive, include=None, exts=None):
     """支持 `--input` 传入多个路径（逗号 / 换行分隔），聚合去重。
 
     单路径时等价于 collect_files；多路径用于一次性批量处理若干分散文件 / 目录。
@@ -206,7 +219,7 @@ def collect_all(input_spec, recursive, include=None):
         part = part.strip()
         if not part:
             continue
-        f, s = collect_files(part, recursive, include=include)
+        f, s = collect_files(part, recursive, include=include, exts=exts)
         files.extend(f)
         skipped.extend(s)
     # 去重并保持顺序
@@ -680,7 +693,7 @@ def main(argv=None):
     print(f"后端：{'mock' if args.mock else args.backend}　语言：{args.lang}　格式：{args.format}"
           f"　递归：{args.recursive}　并行：{args.workers}　最低置信度：{args.min_conf}")
 
-    files, skipped = collect_all(args.input, args.recursive, include=args.include)
+    files, skipped = collect_all(args.input, args.recursive, include=args.include, exts=args.ext)
     if not files:
         # 隐性可观测性：原实现把 collect_all 返回的 skipped 直接丢弃，
         # 用户只能看到「未找到」却不知为何被排除；这里显式说明跳过情况。
