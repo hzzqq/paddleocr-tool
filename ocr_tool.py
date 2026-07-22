@@ -62,8 +62,8 @@ def parse_args(argv=None):
                         help="输出目录")
     parser.add_argument("--lang", default="ch",
                         help="识别语言，默认 ch（中文）。tesseract 可用 chi_sim 等")
-    parser.add_argument("--format", choices=["md", "json", "csv", "txt"],
-                        default="md", help="输出格式，默认 md（txt 为逐文件纯文本）")
+    parser.add_argument("--format", choices=["md", "json", "csv", "txt", "jsonl"],
+                        default="md", help="输出格式，默认 md（txt 为逐文件纯文本，jsonl 为每行一条 JSON）")
     parser.add_argument("--recursive", action="store_true",
                         help="递归遍历子目录")
     parser.add_argument("--backend", choices=["paddle", "tesseract"],
@@ -422,6 +422,13 @@ def write_outputs(results, output_dir, fmt, combine=False):
     elif fmt == "txt":
         for r in results:
             write_text(r, output_dir)
+    elif fmt == "jsonl":
+        # 每行一条 JSON，便于 grep/awk/jq 等行式工具与流式消费
+        jsonl_path = output_dir / "results.jsonl"
+        with open(jsonl_path, "w", encoding="utf-8") as f:
+            for r in results:
+                f.write(json.dumps(r, ensure_ascii=False) + "\n")
+        print(f"[完成] 已写出：{jsonl_path}")
 
     # 始终写出人类可读的汇总（新产物：一眼看清本次跑批结果）
     summary_path = output_dir / "summary.txt"

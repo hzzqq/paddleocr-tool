@@ -280,3 +280,24 @@ def test_main_emits_confidence_field(tmp_path):
     assert "avg_conf" in data[0]
     assert data[0]["avg_conf"] is None  # mock 不产出置信度
 
+
+def test_main_jsonl_format(tmp_path):
+    """R1 新需求验证：--format jsonl 写出 results.jsonl（每行一条 JSON）。"""
+    import json as _json
+
+    img = tmp_path / "a.png"
+    img.write_bytes(b"fake")
+    out = tmp_path / "out"
+    rc = ocr_tool.main([
+        "--input", str(img), "--output", str(out), "--mock", "--format", "jsonl",
+    ])
+    assert rc == 0
+    assert (out / "results.jsonl").exists()
+    lines = (out / "results.jsonl").read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 1
+    # 每行都是合法 JSON，且含 file 字段
+    obj = _json.loads(lines[0])
+    assert obj["file"].endswith("a.png")
+    # md 逐文件产物不应在 jsonl 模式下写出
+    assert not (out / "a.md").exists()
+
