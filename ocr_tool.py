@@ -118,6 +118,8 @@ def parse_args(argv=None):
                         help="处理顺序：name=按文件名字典序（默认，确定性）；size=按体积降序（大文件优先，利于并行吞吐）")
     parser.add_argument("--fail-on-error", action="store_true",
                         help="R1 新能力：任一文件识别失败时返回非零退出码（默认仍返回 0），便于 CI / 流水线把「部分失败」升级为构建失败")
+    parser.add_argument("--retries", type=int, default=0,
+                        help="R1 新能力：单文件/单页识别失败时的重试次数（默认 0 不重试），提升对瞬时错误的韧性")
     return parser.parse_args(argv)
 
 
@@ -404,10 +406,28 @@ def build_recognizer(args):
         return (lambda img: recognize_tesseract(pytesseract, Image, img, tlang), "tesseract")
 
 
-def process_file(file_path, recognizer, backend_name):
+def _recognize_with_retry(recognizer, image_input, retries: int):
+    """调用识别器，遇异常按 retries 次数重试（仅最后一次异常才向上抛）。
+
+    R1 新能力：单页/单图识别偶发失败（内存抖动、后端瞬时异常）时自动重试，
+    提升批处理对瞬时错误的韧性，避免一次抖动就丢掉整份结果。
+    """
+    last_exc = None
+    for attempt in range(retries + 1):
+        try:
+            return recognizer(image_input)
+        except Exception as e:  # 瞬态错误：重试
+            last_exc = e
+            if attempt < retries:
+                continue
+    raise last_exc
+
+
+def process_file(file_path, recognizer, backend_name, retries: int = 0):
     """处理单个文件，返回结果字典。
 
     对 PDF 会先转图再逐页识别，合并文本。
+    retries：单页/单图识别失败时的最大重试次数（R1 新能力，默认 0 不重试）。
     """
     ext = file_path.suffix.lower()
     start = time.time()
@@ -428,17 +448,31 @@ def process_file(file_path, recognizer, backend_name):
                     "min_conf": None,
                 }
             pages = []
+            page_errors = 0
             for idx, img in enumerate(images, 1):
-                ptext, pconf = recognizer(img)
-                pages.append(f"--- 第 {idx} 页 ---\n" + ptext)
-                if pconf:
-                    file_confs.extend(pconf)
+                # R1 韧性：单页识别失败按 --retries 重试，避免偶发异常中断
+                try:
+                    ptext, pconf = _recognize_with_retry(recognizer, img, retries)
+                    pages.append(f"--- 第 {idx} 页 ---\n" + (ptext or ""))
+                    if pconf:
+                        file_confs.extend(pconf)
+                except Exception as e:
+                    page_errors += 1
+                    pages.append(f"--- 第 {idx} 页 ---\n[第 {idx} 页识别失败：{e}]")
             text = "\n\n".join(pages)
+            # R2 修复（隐性健壮性问题）：原实现任一页异常即把整份 PDF 标 error 并
+            # 丢弃其余已成功页文本；现仅当「全部页都失败」才标 error，否则保留
+            # 已识别页面、把失败页以占位说明呈现，最大化可用产出。
+            if page_errors == len(images):
+                status = "error"
+                error_msg = f"{page_errors}/{len(images)} 页识别失败"
+            else:
+                status = "ok"
         else:
-            text, fconf = recognizer(file_path)
+            text, fconf = _recognize_with_retry(recognizer, file_path, retries)
             if fconf:
                 file_confs.extend(fconf)
-        status = "ok"
+            status = "ok"
     except Exception as e:
         text = ""
         status = "error"
@@ -762,7 +796,7 @@ def main(argv=None):
         from concurrent.futures import ThreadPoolExecutor
 
         with ThreadPoolExecutor(max_workers=args.workers) as ex:
-            futures = [ex.submit(process_file, f, recognizer, backend_name) for f in files]
+            futures = [ex.submit(process_file, f, recognizer, backend_name, args.retries) for f in files]
             for i, fut in enumerate(futures, 1):
                 res = fut.result()
                 if not args.quiet:
@@ -772,7 +806,7 @@ def main(argv=None):
         for i, f in enumerate(files, 1):
             if not args.quiet:
                 print(f"[进度] 处理第 {i}/{len(files)} 个：{f}")
-            res = process_file(f, recognizer, backend_name)
+            res = process_file(f, recognizer, backend_name, args.retries)
             results.append(res)
 
     # R2 修复（隐性一致性 bug）：原实现先 write_outputs 再 apply_min_chars，

@@ -63,6 +63,56 @@ def test_collect_files_skips_hidden_dir(tmp_path):
     assert any(f.name == "config.png" for f in skipped)
 
 
+def test_process_file_retries_then_succeeds(tmp_path):
+    """R1 新需求验证：--retries 让偶发失败的单图识别自动重试直至成功。"""
+    calls = {"n": 0}
+
+    def flaky(img):
+        calls["n"] += 1
+        if calls["n"] < 3:
+            raise RuntimeError("transient")
+        return ("恢复的文本", [0.9])
+
+    f = tmp_path / "a.png"
+    f.write_bytes(b"\x89PNG")
+    res = ocr_tool.process_file(f, flaky, "paddle", retries=2)
+    assert res["status"] == "ok"
+    assert res["text"] == "恢复的文本"
+    assert calls["n"] == 3  # 重试两次后第 3 次成功
+
+
+def test_process_file_retries_exhausted(tmp_path):
+    """重试耗尽仍失败应标记为 error（而非静默成功）。"""
+
+    def flaky(img):
+        raise RuntimeError("boom")
+
+    f = tmp_path / "a.png"
+    f.write_bytes(b"\x89PNG")
+    res = ocr_tool.process_file(f, flaky, "paddle", retries=1)
+    assert res["status"] == "error"
+
+
+def test_process_file_pdf_partial_page_failure(tmp_path, monkeypatch):
+    """R2 隐性健壮性验证：PDF 仅部分页失败时不应丢弃其余页，整体仍标 ok。"""
+    pages = {"n": 0}
+
+    def rec(img):
+        pages["n"] += 1
+        if pages["n"] == 1:
+            return ("第一页内容", [0.9])
+        raise RuntimeError("page2 failed")
+
+    monkeypatch.setattr(ocr_tool, "pdf_to_images", lambda p: [object(), object()])
+    f = tmp_path / "doc.pdf"
+    f.write_bytes(b"%PDF")
+    res = ocr_tool.process_file(f, rec, "paddle", retries=0)
+    assert res["status"] == "ok"  # 仅一页失败，整体仍可用
+    assert "第一页内容" in res["text"]
+    assert "第 2 页" in res["text"]  # 失败页以占位说明呈现
+    assert "识别失败" in res["text"]
+
+
 def _make_line(text, conf):
     # 真实 PaddleOCR 结构：result 是「行列表」，每行 = [bbox, (文本, 置信度)]
     return [[[0, 0], [1, 0], [1, 1], [0, 1]], (text, conf)]
