@@ -654,6 +654,49 @@ def test_main_valid_lang_no_warning(tmp_path, capsys):
     assert "不在官方支持列表" not in out_text
 
 
+def test_main_min_conf_out_of_range_clamped(tmp_path, capsys):
+    """R1/R2 护栏：--min-conf 误用百分比(60>1) 时应钳制到 [0,1] 并告警。
+
+    修复前：用户传 --min-conf 60（误以为百分比）会在 paddle 后端下过滤掉
+    全部识别行、结果为空且无任何提示（静默全丢）。
+    """
+    img = tmp_path / "a.png"
+    img.write_bytes(b"fake")
+    out = tmp_path / "out"
+    rc = ocr_tool.main([
+        "--input", str(img), "--output", str(out), "--mock", "--min-conf", "60",
+    ])
+    assert rc == 0
+    out_text = capsys.readouterr().out
+    assert "0~1 之间" in out_text and "钳制" in out_text
+
+
+def test_main_low_conf_threshold_out_of_range_clamped(tmp_path, capsys):
+    """R1/R2 护栏：--low-conf-threshold 越界(>1) 时钳制到 1.0 并告警。"""
+    img = tmp_path / "a.png"
+    img.write_bytes(b"fake")
+    out = tmp_path / "out"
+    rc = ocr_tool.main([
+        "--input", str(img), "--output", str(out), "--mock", "--low-conf-threshold", "5",
+    ])
+    assert rc == 0
+    out_text = capsys.readouterr().out
+    assert "0~1 之间" in out_text and "钳制" in out_text
+
+
+def test_main_min_conf_valid_range_no_clamp_warning(tmp_path, capsys):
+    """合法区间内的 --min-conf（如 0.5）不应触发钳制告警。"""
+    img = tmp_path / "a.png"
+    img.write_bytes(b"fake")
+    out = tmp_path / "out"
+    rc = ocr_tool.main([
+        "--input", str(img), "--output", str(out), "--mock", "--min-conf", "0.5",
+    ])
+    assert rc == 0
+    out_text = capsys.readouterr().out
+    assert "0~1 之间" not in out_text
+
+
 def test_main_missing_required_args_returns_error():
     """可观测性：未提供 --input/--output 时给出明确错误码 1。"""
     rc = ocr_tool.main([])

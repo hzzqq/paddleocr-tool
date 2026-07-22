@@ -968,6 +968,19 @@ def main(argv=None):
     if args.lang not in SUPPORTED_LANGS:
         print(f"[提示] 语言代码 '{args.lang}' 不在官方支持列表，请运行 --lang-list 查看；"
               f"将按原样传给后端，可能因不支持而失败。")
+    # R1/R2 输入护栏：--min-conf / --low-conf-threshold 是 0~1 的置信度「比例」，
+    # 用户常误用 0~100 的「百分比」（如 --min-conf 60），导致所有识别行被过滤、
+    # 结果为空且无任何提示（隐性可观测性缺口）。现越界时钳制到 [0,1] 并告警，
+    # 避免「静默全丢」；合法区间内的取值不动。
+    if args.min_conf < 0 or args.min_conf > 1:
+        clamped = max(0.0, min(1.0, args.min_conf))
+        print(f"[提示] --min-conf 应在 0~1 之间（置信度比例，非百分比），"
+              f"已钳制为 {clamped}（原值 {args.min_conf}）")
+        args.min_conf = clamped
+    if args.low_conf_threshold > 1:
+        print(f"[提示] --low-conf-threshold 应在 0~1 之间（置信度比例，非百分比），"
+              f"已钳制为 1.0（原值 {args.low_conf_threshold}）")
+        args.low_conf_threshold = 1.0
     # 安全护栏：限制并行线程数，避免 --workers 过大耗尽系统资源
     if args.workers > MAX_WORKERS:
         print(f"[提示] --workers 超过安全上限 {MAX_WORKERS}，已自动限制为 {MAX_WORKERS}")
