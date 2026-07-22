@@ -12,12 +12,13 @@ PaddleOCR 批量图文抽取工具 —— Streamlit Web 界面（可选）
 """
 
 import json
-import re
 import subprocess
 import sys
 from pathlib import Path
 
 import streamlit as st
+
+from ocr_tool import parse_progress  # 进度解析纯函数（DRY + 可单测）
 
 st.set_page_config(page_title="PaddleOCR 批量图文抽取", page_icon="📄")
 
@@ -29,7 +30,7 @@ with st.sidebar:
     input_dir = st.text_input("输入目录", placeholder="例如 D:/docs/images")
     output_dir = st.text_input("输出目录", placeholder="例如 D:/docs/out")
     lang = st.text_input("识别语言", value="ch")
-    fmt = st.selectbox("输出格式", ["md", "json", "csv"])
+    fmt = st.selectbox("输出格式", ["md", "json", "csv", "txt"])
     recursive = st.checkbox("递归遍历子目录", value=False)
     backend = st.selectbox("OCR 后端", ["paddle", "tesseract"])
     workers = st.number_input("并行线程数", min_value=1, max_value=8, value=1, step=1)
@@ -78,9 +79,9 @@ if start:
                 continue
             lines_seen.append(line.rstrip("\n"))
             log_box.code("\n".join(lines_seen[-200:]), language="text")
-            m = re.search(r"\[进度\].*?(\d+)/(\d+)", line)
-            if m:
-                done, total = int(m.group(1)), int(m.group(2))
+            prog = parse_progress(line)
+            if prog:
+                done, total = prog
                 if total:
                     progress.progress(min(done / total, 1.0), text=f"识别中 {done}/{total}")
         proc.wait()

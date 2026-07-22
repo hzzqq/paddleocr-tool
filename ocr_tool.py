@@ -134,6 +134,20 @@ def collect_all(input_spec, recursive):
     return uniq, skipped
 
 
+# 子进程进度行解析（供 ui.py 流式进度复用，抽为纯函数便于单测）
+_PROGRESS_RE = re.compile(r"\[进度\].*?(\d+)/(\d+)")
+
+
+def parse_progress(line: str):
+    """从子进程日志行解析 (已完成, 总数)；非进度行返回 None。"""
+    if not line:
+        return None
+    m = _PROGRESS_RE.search(line)
+    if not m:
+        return None
+    return int(m.group(1)), int(m.group(2))
+
+
 def load_paddle_backend():
     """懒加载 PaddleOCR 后端，缺失时抛出带安装提示的异常。"""
     try:

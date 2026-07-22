@@ -147,3 +147,10 @@ def test_recognize_paddle_rebuild_on_lang_change():
     assert _FakeOCR.instances - before == 2
     ocr_tool.recognize_paddle(_FakeOCR, "z.png", "en")  # 同语言 -> 复用
     assert _FakeOCR.instances - before == 2
+
+
+def test_parse_progress():
+    """UI 流式进度的纯函数解析（DRY + 可单测）。"""
+    assert ocr_tool.parse_progress("[进度] 完成 3/10：x.png (ok)") == (3, 10)
+    assert ocr_tool.parse_progress("普通日志行") is None
+    assert ocr_tool.parse_progress("") is None
