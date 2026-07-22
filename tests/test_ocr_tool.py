@@ -1084,3 +1084,32 @@ def test_main_max_size_end_to_end_mock(tmp_path, capsys):
     assert rc == 0
     assert (out / "small.txt").exists()
     assert not (out / "big.txt").exists()
+
+
+def test_collect_files_multi_include(tmp_path):
+    """R1 新需求验证：--include 支持逗号分隔的多个模式（OR 语义）。"""
+    (tmp_path / "cover.png").write_bytes(b"x")
+    (tmp_path / "page2.png").write_bytes(b"x")
+    (tmp_path / "other.jpg").write_bytes(b"x")
+    files, _ = ocr_tool.collect_files(str(tmp_path), recursive=False, include="cover,page2")
+    assert {f.name for f in files} == {"cover.png", "page2.png"}
+
+
+def test_write_combined_respects_status_filter(tmp_path):
+    """R2 验证：write_combined 的 status_filter 真正生效（可合并非 ok 状态）。
+
+    原实现硬编码 status=='ok'，status_filter 对 empty/filtered 永远无效，
+    本测试确认 --combine --status-filter empty 能合并空识别结果、排除 ok。
+    """
+    out = tmp_path / "out"
+    results = [
+        {"file": "a.png", "text": "成功文本", "chars": 4, "elapsed": 0.1,
+         "status": "ok", "error": "", "avg_conf": 0.9, "min_conf": 0.8},
+        {"file": "b.png", "text": "空白内容", "chars": 4, "elapsed": 0.1,
+         "status": "empty", "error": "", "avg_conf": None, "min_conf": None},
+    ]
+    path = ocr_tool.write_combined(results, str(out), "md", status_filter=["empty"])
+    assert path is not None
+    content = Path(path).read_text(encoding="utf-8")
+    assert "空白内容" in content
+    assert "成功文本" not in content

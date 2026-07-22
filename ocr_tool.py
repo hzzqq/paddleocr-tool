@@ -137,10 +137,29 @@ def parse_args(argv=None):
     return parser.parse_args(argv)
 
 
-def _name_matches(name: str, include: str) -> bool:
-    """文件名是否匹配 --include（子串或 glob 任一命中即视为匹配）。"""
+def _split_include(include) -> "list[str]":
+    """把 --include 解析为「模式列表」（R1 新能力：支持多个逗号/换行分隔的模式）。
+
+    单字符串按逗号 / 换行切分为多个模式（任一命中即保留）；已是列表则直接清洗。
+    空值返回空列表（表示不过滤）。
+    """
+    if include is None:
+        return []
+    if isinstance(include, (list, tuple, set)):
+        return [p for p in include if p and str(p).strip()]
+    return [p.strip() for p in re.split(r"[,\n]", str(include)) if p.strip()]
+
+
+def _name_matches(name: str, include) -> bool:
+    """文件名是否匹配 --include（子串或 glob 任一命中即视为匹配）。
+
+    R1 新能力：include 可为「模式列表」（多模式 OR）；单模式时退化为原行为。
+    空列表 / None 视为不过滤。
+    """
     if not include:
         return True
+    if isinstance(include, (list, tuple, set)):
+        return any(_name_matches(name, p) for p in include)
     return include in name or fnmatch.fnmatch(name, include)
 
 
@@ -163,9 +182,10 @@ def collect_files(input_path, recursive, include=None, exts=None, max_depth=None
     if exts is not None:
         exts = {e.strip().lower() for e in exts.split(",") if e.strip()}
     allowed_exts = exts if exts is not None else (IMAGE_EXTS | PDF_EXTS)
+    include_list = _split_include(include)  # R1：支持多模式 OR
     if p.is_file():
         ext = p.suffix.lower()
-        if ext in allowed_exts and _name_matches(p.name, include):
+        if ext in allowed_exts and _name_matches(p.name, include_list):
             if max_size and max_size > 0 and _safe_size(p) > max_size:
                 skipped.append(p)  # 超过体积上限
             else:
@@ -198,7 +218,7 @@ def collect_files(input_path, recursive, include=None, exts=None, max_depth=None
             continue
         ext = f.suffix.lower()
         if ext in allowed_exts:
-            if _name_matches(f.name, include):
+            if _name_matches(f.name, include_list):
                 if max_size and max_size > 0 and _safe_size(f) > max_size:
                     skipped.append(f)  # 超过体积上限
                     continue
@@ -693,8 +713,16 @@ def write_combined(results, output_dir, fmt, status_filter=None):
         allowed = {x.strip() for x in status_filter if x and x.strip()}
     ok_results = [
         r for r in results
-        if r.get("status") == "ok" and r.get("text")
-        and (allowed is None or r.get("status") in allowed)
+        if r.get("text")
+        and (
+            # 未指定 status_filter：按默认「成功且有文本」合并
+            (allowed is None and r.get("status") == "ok")
+            # 指定了 status_filter：严格按用户选择的状态集合合并
+            # （R2 修复：原实现硬编码 status=="ok"，使 status_filter 仅能在
+            #  ok 内收窄、永远无法合并 empty/filtered 等状态，与 write_outputs
+            #  逐文件产物的 status_filter 行为不一致且形同虚设）
+            or (allowed is not None and r.get("status") in allowed)
+        )
     ]
     if not ok_results:
         # R2 隐性问题：原本会写出一个只含换行的空 _combined 文件，
