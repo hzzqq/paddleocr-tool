@@ -31,6 +31,9 @@ IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".bmp"}
 # 支持的 PDF 扩展名
 PDF_EXTS = {".pdf"}
 
+# 并行线程数安全上限（防止 --workers 过大耗尽系统资源）
+MAX_WORKERS = 16
+
 # 各后端缺失时的安装提示
 INSTALL_HINTS = {
     "paddle": "请安装 PaddleOCR：pip install paddleocr paddlepaddle\n"
@@ -73,6 +76,8 @@ def parse_args(argv=None):
                         help="并行识别的线程数（默认 1，串行）；多图时显著提速")
     parser.add_argument("--min-conf", type=float, default=0.0,
                         help="最低置信度阈值（仅 paddle 后端生效，0~1，低于则丢弃该行）")
+    parser.add_argument("--combine", action="store_true",
+                        help="额外输出一个合并文件（_combined.md / .txt），把所有成功结果按序拼接，便于下游一次性消费")
     return parser.parse_args(argv)
 
 
@@ -347,8 +352,32 @@ def write_text(result, output_dir):
     return out_path
 
 
-def write_outputs(results, output_dir, fmt):
-    """根据格式写出结果文件。"""
+def write_combined(results, output_dir, fmt):
+    """把所有成功结果按文件顺序拼接成单个合并文件。
+
+    合并文件格式跟随 fmt：fmt 为 txt 时输出 _combined.txt（纯文本段），
+    其余情况输出 _combined.md（以文件名作小标题）。error/skipped 的结果不计入合并。
+    """
+    out_dir = Path(output_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    blocks = []
+    for r in results:
+        if r.get("status") != "ok" or not r.get("text"):
+            continue
+        src = Path(r["file"]).name
+        if fmt == "txt":
+            blocks.append(f"===== {src} =====\n{r['text']}")
+        else:
+            blocks.append(f"## {src}\n\n{r['text']}")
+    ext = "txt" if fmt == "txt" else "md"
+    path = out_dir / f"_combined.{ext}"
+    path.write_text("\n\n".join(blocks) + "\n", encoding="utf-8")
+    print(f"[完成] 已写出合并文件：{path}")
+    return path
+
+
+def write_outputs(results, output_dir, fmt, combine=False):
+    """根据格式写出结果文件。combine=True 时额外写出合并文件。"""
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -393,6 +422,10 @@ def write_outputs(results, output_dir, fmt):
     ]
     summary_path.write_text("\n".join(summary_lines) + "\n", encoding="utf-8")
 
+    # 可选：合并输出（把全部成功结果按序拼接成单个文件）
+    if combine:
+        write_combined(results, output_dir, fmt)
+
     print(f"[完成] 已写出：{json_path}")
     print(f"[完成] 已写出：{csv_path}")
     print(f"[完成] 已写出汇总：{summary_path}")
@@ -402,6 +435,12 @@ def write_outputs(results, output_dir, fmt):
 
 def main(argv=None):
     args = parse_args(argv)
+    # 安全护栏：限制并行线程数，避免 --workers 过大耗尽系统资源
+    if args.workers > MAX_WORKERS:
+        print(f"[提示] --workers 超过安全上限 {MAX_WORKERS}，已自动限制为 {MAX_WORKERS}")
+        args.workers = MAX_WORKERS
+    if args.workers < 1:
+        args.workers = 1
     print(f"=== PaddleOCR 批量图文抽取工具 ===")
     print(f"输入：{args.input}　输出：{args.output}")
     print(f"后端：{'mock' if args.mock else args.backend}　语言：{args.lang}　格式：{args.format}"
@@ -449,7 +488,7 @@ def main(argv=None):
             res = process_file(f, recognizer, backend_name)
             results.append(res)
 
-    write_outputs(results, args.output, args.format)
+    write_outputs(results, args.output, args.format, combine=args.combine)
     ok = sum(1 for r in results if r["status"] == "ok")
     print(f"[汇总] 成功 {ok}/{len(results)}，结果见：{args.output}")
     return 0

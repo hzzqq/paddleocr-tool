@@ -183,3 +183,47 @@ def test_parse_progress():
     assert ocr_tool.parse_progress("[进度] 完成 3/10：x.png (ok)") == (3, 10)
     assert ocr_tool.parse_progress("普通日志行") is None
     assert ocr_tool.parse_progress("") is None
+
+
+def test_write_combined_md_excludes_failed(tmp_path):
+    """R1 新需求验证：--combine 应把所有成功结果按序合并，失败项不计入。"""
+    results = [
+        {"file": "a.png", "text": "第一张", "chars": 3,
+         "elapsed": 0.1, "status": "ok", "error": ""},
+        {"file": "b.png", "text": "第二张", "chars": 3,
+         "elapsed": 0.1, "status": "ok", "error": ""},
+        {"file": "c.png", "text": "", "chars": 0,
+         "elapsed": 0.0, "status": "error", "error": "boom"},
+    ]
+    path = ocr_tool.write_combined(results, str(tmp_path), "md")
+    txt = path.read_text(encoding="utf-8")
+    assert "## a.png" in txt and "第一张" in txt
+    assert "## b.png" in txt and "第二张" in txt
+    assert "c.png" not in txt  # 失败项不计入合并
+
+
+def test_write_combined_txt_extension(tmp_path):
+    """--combine 在 txt 格式下应生成 _combined.txt。"""
+    results = [
+        {"file": "a.png", "text": "内容", "chars": 2,
+         "elapsed": 0.1, "status": "ok", "error": ""}
+    ]
+    path = ocr_tool.write_combined(results, str(tmp_path), "txt")
+    assert path.name == "_combined.txt"
+    assert "===== a.png =====" in path.read_text(encoding="utf-8")
+
+
+def test_main_combine_and_workers_cap(tmp_path, capsys):
+    """R1 新需求 + R2 隐性安全：--combine 生成合并文件；--workers 超限被钳制。"""
+    img = tmp_path / "a.png"
+    img.write_bytes(b"fake")
+    out = tmp_path / "out"
+    rc = ocr_tool.main([
+        "--input", str(img), "--output", str(out),
+        "--mock", "--combine", "--workers", "999",
+    ])
+    assert rc == 0
+    assert (out / "_combined.md").exists()
+    assert (out / "results.json").exists()
+    out_text = capsys.readouterr().out
+    assert "安全上限" in out_text  # workers 被钳制提示
