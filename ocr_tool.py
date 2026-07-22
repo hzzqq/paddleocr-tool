@@ -722,12 +722,15 @@ def main(argv=None):
             res = process_file(f, recognizer, backend_name)
             results.append(res)
 
-    write_outputs(results, args.output, args.format, combine=args.combine)
-    # R1 噪声过滤：低于 --min-chars 的成功结果标记 filtered（不计入成功/合并）
+    # R2 修复（隐性一致性 bug）：原实现先 write_outputs 再 apply_min_chars，
+    # 导致逐文件 .md / results.json / summary.txt 已按状态 "ok" 落盘，随后 status
+    # 被改为 "filtered"，最终 stats.json 与打印的成功数却更低——磁盘产物与统计不一致。
+    # 现改为先标记 filtered，再统一写出，保证所有产物状态一致。
     if args.min_chars > 0:
         filtered = apply_min_chars(results, args.min_chars)
         if filtered:
             print(f"[提示] {len(filtered)} 个结果因识别字符数低于 {args.min_chars} 被标记为 filtered（不计入成功）")
+    write_outputs(results, args.output, args.format, combine=args.combine)
     ok = sum(1 for r in results if r["status"] == "ok")
     print(f"[汇总] 成功 {ok}/{len(results)}，结果见：{args.output}")
 

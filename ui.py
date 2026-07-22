@@ -36,6 +36,7 @@ with st.sidebar:
     workers = st.number_input("并行线程数", min_value=1, max_value=8, value=1, step=1)
     min_conf = st.slider("最低置信度（仅 paddle 生效）", 0.0, 1.0, 0.0, 0.05)
     include = st.text_input("文件名过滤（--include，可选）", placeholder="如 *page* 或 封面")
+    max_files = st.number_input("最多处理文件数（0=不限制）", min_value=0, max_value=1000, value=0, step=1)
     use_mock = st.checkbox("Mock 模式（无需 OCR 依赖，演示流程）", value=False)
     combine = st.checkbox("合并输出（生成 _combined.md/.txt）", value=False)
     dry_run = st.checkbox("仅预检（统计待处理文件，不执行 OCR）", value=False)
@@ -68,6 +69,8 @@ if start:
             cmd.append("--recursive")
         if include:
             cmd += ["--include", include]
+        if max_files and max_files > 0:
+            cmd += ["--max-files", str(max_files)]
         if use_mock:
             cmd.append("--mock")
         if combine:

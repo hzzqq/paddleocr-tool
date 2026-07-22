@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 
@@ -528,4 +529,39 @@ def test_main_missing_required_args_returns_error():
     """可观测性：未提供 --input/--output 时给出明确错误码 1。"""
     rc = ocr_tool.main([])
     assert rc == 1
+
+
+def test_main_max_files_limits_processing(tmp_path, capsys):
+    """R1 新需求验证：--max-files N 只处理前 N 个文件（其余计入跳过）。"""
+    for i in range(5):
+        (tmp_path / f"img{i}.png").write_bytes(b"x")
+    out = tmp_path / "out"
+    rc = ocr_tool.main([
+        "--input", str(tmp_path), "--output", str(out), "--mock", "--max-files", "2",
+    ])
+    assert rc == 0
+    data = json.loads((out / "results.json").read_text(encoding="utf-8"))
+    assert len(data) == 2  # 仅处理前 2 个
+    out_text = capsys.readouterr().out
+    assert "max-files" in out_text
+    assert "3 个" in out_text  # 其余 3 个计入跳过
+
+
+def test_main_min_chars_reflected_in_results_json(tmp_path):
+    """R2 验证：--min-chars 标记 filtered 必须在 write_outputs 之前完成，
+    保证 results.json / 逐文件产物状态与最终统计一致（原实现顺序相反，磁盘产物报 ok
+    但统计报 filtered，互相矛盾）。"""
+    (tmp_path / "a.png").write_bytes(b"x")
+    (tmp_path / "b.png").write_bytes(b"x")
+    out = tmp_path / "out"
+    rc = ocr_tool.main([
+        "--input", str(tmp_path), "--output", str(out), "--mock", "--min-chars", "9999",
+    ])
+    assert rc == 0
+    data = json.loads((out / "results.json").read_text(encoding="utf-8"))
+    # mock 返回的文本较短，应全部被标记 filtered，而非 ok
+    assert all(d["status"] == "filtered" for d in data)
+    # summary/stats 的成功数也应与产物一致（均为 0）
+    summary = (out / "summary.txt").read_text(encoding="utf-8")
+    assert "成功(ok)：0" in summary
 
