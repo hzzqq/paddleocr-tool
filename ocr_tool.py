@@ -234,13 +234,34 @@ def collect_all(input_spec, recursive, include=None, exts=None, max_depth=None):
 
     单路径时等价于 collect_files；多路径用于一次性批量处理若干分散文件 / 目录。
     max_depth 透传给 collect_files（递归深度上限，详见 collect_files）。
+
+    R1 新能力：各路径片段支持 glob 模式（如 `dir/*.png`、`imgs/**/*.jpg`），
+    自动展开为匹配文件逐个处理，省去用户先 `ls` 再粘贴文件列表。
     """
+    import glob as _glob
+
     files = []
     skipped = []
     for part in re.split(r"[,\n]", input_spec or ""):
         part = part.strip()
         if not part:
             continue
+        # R1：glob 模式展开（含 * ? [ ]）。此前这类输入会被当字面路径，
+        # 命中「路径不存在」分支静默失败（R2 隐性可用性缺陷）。
+        if any(ch in part for ch in "*?["):
+            matched = _glob.glob(part, recursive=True)
+            if matched:
+                for m in matched:
+                    f, s = collect_files(
+                        m, recursive, include=include, exts=exts, max_depth=max_depth
+                    )
+                    files.extend(f)
+                    skipped.extend(s)
+                continue
+            else:
+                # glob 无匹配：视为「类型不支持」计入跳过，保持透明
+                skipped.append(Path(part))
+                continue
         f, s = collect_files(
             part, recursive, include=include, exts=exts, max_depth=max_depth
         )

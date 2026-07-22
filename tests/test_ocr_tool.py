@@ -964,3 +964,41 @@ def test_dry_run_without_output(tmp_path, capsys):
     out = capsys.readouterr().out
     assert "dry-run" in out
     assert "2" in out  # 两个待处理文件
+
+
+def test_collect_all_glob_expands(tmp_path):
+    """R1 验证：--input 支持 glob 模式（如 dir/*.png），展开为匹配文件。"""
+    (tmp_path / "a.png").write_bytes(b"x")
+    (tmp_path / "b.png").write_bytes(b"x")
+    (tmp_path / "c.jpg").write_bytes(b"x")
+    (tmp_path / "d.txt").write_text("x")
+    files, skipped = ocr_tool.collect_all(str(tmp_path / "*.png"), recursive=False)
+    names = {f.name for f in files}
+    assert names == {"a.png", "b.png"}  # 仅 png 命中 glob
+    assert "c.jpg" not in names
+    assert "d.txt" not in names
+
+
+def test_collect_all_glob_no_match_counts_skipped(tmp_path):
+    """R2 验证：无匹配的 glob 应计入 skipped（透明），而非静默丢失。"""
+    (tmp_path / "a.png").write_bytes(b"x")
+    files, skipped = ocr_tool.collect_all(str(tmp_path / "*.pdf"), recursive=False)
+    assert files == []
+    assert len(skipped) == 1  # 无匹配 glob 计入跳过
+
+
+def test_main_glob_end_to_end_mock(tmp_path, capsys):
+    """R1 端到端验证：以 glob 作为输入跑 mock 批处理，仅命中匹配文件。"""
+    out = tmp_path / "out"
+    (tmp_path / "a.png").write_bytes(b"x")
+    (tmp_path / "b.png").write_bytes(b"x")
+    (tmp_path / "c.jpg").write_bytes(b"x")
+    rc = ocr_tool.main([
+        "--input", str(tmp_path / "*.png"),
+        "--output", str(out), "--mock", "--format", "txt",
+    ])
+    assert rc == 0
+    # 仅 png 被处理（summary.txt 也以 .txt 结尾，需排除）
+    assert (out / "a.txt").exists()
+    assert (out / "b.txt").exists()
+    assert not (out / "c.txt").exists()
