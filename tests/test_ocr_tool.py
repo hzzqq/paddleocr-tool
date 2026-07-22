@@ -899,3 +899,32 @@ def test_main_report_writes_json(tmp_path, capsys):
         str(tmp_path / "a.png"), str(tmp_path / "b.png")
     }
     assert "已写出运行报告" in capsys.readouterr().out
+
+
+def test_available_backends_shape():
+    """R1 新能力：探测各后端依赖可用性，返回固定三键的布尔字典。"""
+    b = ocr_tool.available_backends()
+    assert set(b.keys()) == {"paddle", "tesseract", "pdf2image"}
+    assert all(isinstance(v, bool) for v in b.values())
+
+
+def test_format_backends_list_is_string():
+    """format_backends_list 返回可读字符串且含三个后端名。"""
+    s = ocr_tool.format_backends_list()
+    assert isinstance(s, str)
+    assert "paddle" in s and "tesseract" in s and "pdf2image" in s
+
+
+def test_list_backends_returns_0_without_io_args(capsys):
+    """R1+R2：信息类标志 --list-backends 不应要求 --input/--output，
+    直接返回 0（此前会被「缺少 --input/--output」拦截而误报）。"""
+    rc = ocr_tool.main(["--list-backends"])
+    assert rc == 0
+    assert "后端依赖" in capsys.readouterr().out
+
+
+def test_list_formats_returns_0_without_io_args(capsys):
+    """回归：--list-formats 同样不应要求 --input/--output。"""
+    rc = ocr_tool.main(["--list-formats"])
+    assert rc == 0
+    assert "支持的" in capsys.readouterr().out

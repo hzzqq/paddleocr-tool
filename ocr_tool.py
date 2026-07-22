@@ -86,6 +86,8 @@ def parse_args(argv=None):
                         help="列出所有官方支持的识别语言代码（含两套后端映射）并退出")
     parser.add_argument("--list-formats", action="store_true",
                         help="列出所有支持的 --format 输出格式及其说明并退出")
+    parser.add_argument("--list-backends", action="store_true",
+                        help="列出本机已安装的 OCR 后端依赖（paddle/tesseract/pdf2image）并退出")
     parser.add_argument("--format", choices=["md", "json", "csv", "txt", "jsonl"],
                         default="md", help="输出格式，默认 md（txt 为逐文件纯文本，jsonl 为每行一条 JSON）")
     parser.add_argument("--recursive", action="store_true",
@@ -404,6 +406,50 @@ def format_format_list() -> str:
     for fmt, desc in FORMAT_INFO.items():
         lines.append(f"{fmt:<8}{desc}")
     lines.append(f"\n默认格式：{DEFAULT_FORMAT}（{FORMAT_INFO[DEFAULT_FORMAT]}）")
+    return "\n".join(lines)
+
+
+def available_backends() -> dict:
+    """探测各 OCR 后端依赖是否可用，返回 {backend: bool}。
+
+    R1 新能力：用户离线/未安装时，先跑 `--list-backends` 即可知道自己
+    能用哪些后端（例如只有 tesseract、没有 paddle），无需等到真正跑批
+    才因缺依赖而报错。探测采用「尝试导入」而非「执行识别」，避免误触发
+    重模型下载或实际拉起后端。
+    """
+    avail = {}
+    try:
+        import paddleocr  # noqa: F401
+        avail["paddle"] = True
+    except Exception:
+        avail["paddle"] = False
+    try:
+        import pytesseract  # noqa: F401
+        from PIL import Image  # noqa: F401
+        avail["tesseract"] = True
+    except Exception:
+        avail["tesseract"] = False
+    try:
+        import pdf2image  # noqa: F401
+        avail["pdf2image"] = True
+    except Exception:
+        avail["pdf2image"] = False
+    return avail
+
+
+def format_backends_list() -> str:
+    """返回 --list-backends 的可读文本（纯函数，便于单测）。"""
+    avail = available_backends()
+    lines = ["已安装的后端依赖："]
+    lines.append(
+        f"  paddle    : {'已安装' if avail['paddle'] else '未安装（pip install paddleocr paddlepaddle）'}"
+    )
+    lines.append(
+        f"  tesseract : {'已安装' if avail['tesseract'] else '未安装（pip install pytesseract + Tesseract 引擎）'}"
+    )
+    lines.append(
+        f"  pdf2image : {'已安装' if avail['pdf2image'] else '未安装（pip install pdf2image + poppler）'}"
+    )
     return "\n".join(lines)
 
 
@@ -855,6 +901,12 @@ def main(argv=None):
     # R1 新能力：--list-formats 仅列出支持的 --format 输出格式即退出
     if args.list_formats:
         print(format_format_list())
+        return 0
+    # R1 新能力：--list-backends 仅列出本机已安装的后端依赖即退出，
+    # 不需 --input/--output（R2 修复：信息类标志不应要求这两个必填参数，
+    # 否则 `ocr --list-backends` 会先被「缺少 --input/--output」拦截而误报）。
+    if args.list_backends:
+        print(format_backends_list())
         return 0
     # 缺少必要参数时给出明确错误（--input/--output 在 --lang-list 外为必填）
     if not args.input or not args.output:
