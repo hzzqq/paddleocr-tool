@@ -67,6 +67,8 @@ def parse_args(argv=None):
                         default="paddle", help="OCR 后端，默认 paddle")
     parser.add_argument("--mock", action="store_true",
                         help="使用 mock 模式返回假文本（无需任何 OCR 依赖，用于演示流程）")
+    parser.add_argument("--dry-run", action="store_true",
+                        help="仅统计待处理文件（按类型），不执行 OCR，便于预检")
     parser.add_argument("--workers", type=int, default=1,
                         help="并行识别的线程数（默认 1，串行）；多图时显著提速")
     parser.add_argument("--min-conf", type=float, default=0.0,
@@ -77,21 +79,22 @@ def parse_args(argv=None):
 def collect_files(input_path, recursive):
     """收集需要处理的文件列表（图片 + PDF）。
 
-    返回 (文件列表, 跳过的 PDF 列表)。
+    返回 (文件列表, 跳过列表)。跳过列表包含不支持类型 / 隐藏文件，便于调用方透明提示。
     """
     p = Path(input_path)
     files = []
+    skipped = []
     if p.is_file():
         ext = p.suffix.lower()
         if ext in IMAGE_EXTS or ext in PDF_EXTS:
             files.append(p)
         else:
-            print(f"[跳过] 不支持的文件类型：{p}")
-        return files, []
+            skipped.append(p)  # 记录不支持的文件类型
+        return files, skipped
 
     if not p.is_dir():
         print(f"[错误] 输入路径不存在：{input_path}")
-        return files, []
+        return files, skipped
 
     # 目录：按扩展名收集
     pattern = "**/*" if recursive else "*"
@@ -99,14 +102,16 @@ def collect_files(input_path, recursive):
         if not f.is_file():
             continue
         if f.name.startswith("."):
-            continue  # 跳过隐藏文件（如 .DS_Store）
+            skipped.append(f)  # 隐藏文件
+            continue
         ext = f.suffix.lower()
         if ext in IMAGE_EXTS:
             files.append(f)
         elif ext in PDF_EXTS:
             files.append(f)
-        # 其他类型忽略
-    return files, []
+        else:
+            skipped.append(f)  # 其他不支持类型
+    return files, skipped
 
 
 def collect_all(input_spec, recursive):
@@ -402,12 +407,24 @@ def main(argv=None):
     print(f"后端：{'mock' if args.mock else args.backend}　语言：{args.lang}　格式：{args.format}"
           f"　递归：{args.recursive}　并行：{args.workers}　最低置信度：{args.min_conf}")
 
-    files, _ = collect_all(args.input, args.recursive)
+    files, skipped = collect_all(args.input, args.recursive)
     if not files:
         print("[提示] 未找到可处理的图片 / PDF 文件。")
         # 仍创建输出目录，避免下游报错
         Path(args.output).mkdir(parents=True, exist_ok=True)
         write_outputs([], args.output, args.format)
+        return 0
+
+    if args.dry_run:
+        # 预检模式：只统计待处理文件，不执行 OCR（新能力 + 可观测性）
+        from collections import Counter
+
+        ext_counter = Counter(f.suffix.lower() for f in files)
+        print(f"[dry-run] 共 {len(files)} 个文件待处理：")
+        for ext, c in ext_counter.most_common():
+            print(f"  {ext}: {c}")
+        if skipped:
+            print(f"[dry-run] 跳过 {len(skipped)} 个不支持 / 隐藏的文件")
         return 0
 
     try:

@@ -149,6 +149,35 @@ def test_recognize_paddle_rebuild_on_lang_change():
     assert _FakeOCR.instances - before == 2
 
 
+def test_collect_files_reports_skipped(tmp_path):
+    """可观测性：不支持/隐藏文件应进入 skipped 列表。"""
+    (tmp_path / "a.png").write_bytes(b"x")
+    (tmp_path / "b.txt").write_text("x")
+    (tmp_path / ".hidden.png").write_bytes(b"")
+    files, skipped = ocr_tool.collect_files(str(tmp_path), recursive=False)
+    names = {f.name for f in files}
+    skip_names = {f.name for f in skipped}
+    assert "a.png" in names
+    assert "b.txt" in skip_names
+    assert ".hidden.png" in skip_names
+
+
+def test_main_dry_run_counts_only(tmp_path, capsys):
+    """R1 新需求验证：--dry-run 只统计不执行 OCR。"""
+    (tmp_path / "a.png").write_bytes(b"x")
+    (tmp_path / "b.jpg").write_bytes(b"x")
+    out = tmp_path / "out"
+    rc = ocr_tool.main([
+        "--input", str(tmp_path), "--output", str(out), "--dry-run",
+    ])
+    assert rc == 0
+    out_text = capsys.readouterr().out
+    assert "dry-run" in out_text
+    assert "2 个文件" in out_text
+    # 不应生成任何 OCR 产物
+    assert not (out / "results.json").exists()
+
+
 def test_parse_progress():
     """UI 流式进度的纯函数解析（DRY + 可单测）。"""
     assert ocr_tool.parse_progress("[进度] 完成 3/10：x.png (ok)") == (3, 10)
