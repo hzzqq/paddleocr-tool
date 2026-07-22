@@ -125,6 +125,9 @@ def parse_args(argv=None):
     parser.add_argument("--status-filter", default=None,
                         help="R1 新能力：只把指定状态的结果写出逐文件/合并产物（逗号分隔，如 'ok' 或 'ok,empty'）；"
                              "不影响 results.json/stats.json 的全量审计信息")
+    parser.add_argument("--report", default=None,
+                        help="R1 新能力：把运行报告（各状态计数 + 各状态文件清单 + 建议重跑清单）"
+                             "以 JSON 写入该路径，便于流水线/人工快速定位需重跑的文件")
     return parser.parse_args(argv)
 
 
@@ -801,6 +804,36 @@ def filter_results_by_status(results: list, statuses) -> list:
     return [r for r in results if r.get("status") in allowed]
 
 
+def build_run_report(results: list) -> dict:
+    """构建机器可读的运行报告（R1 新能力 + R2 修复）。
+
+    返回：
+      {
+        "counts": <summarize_statuses 结果>,
+        "by_status": {status: [文件路径...]},   # 各状态对应的具体文件清单
+        "rerun_candidates": [文件路径...],        # 建议重跑的 empty/filtered/error 文件
+      }
+
+    R2 隐性可观测性缺口：原 summary.txt / stats.json 只给「计数」，当一批里有
+    若干 empty / filtered / error 时，用户必须自己 grep results.json 才能知道
+    到底是哪些文件出了问题、该重跑哪些——毫无头绪。这里把具体文件路径按状态
+    分组并给出「建议重跑清单」，配合 --report 直接落盘，省去手动排查。
+    """
+    by_status: dict = {}
+    for r in results:
+        st = r.get("status", "unknown")
+        by_status.setdefault(st, []).append(r.get("file", ""))
+    rerun = [
+        r.get("file", "") for r in results
+        if r.get("status") in ("empty", "filtered", "error")
+    ]
+    return {
+        "counts": summarize_statuses(results),
+        "by_status": by_status,
+        "rerun_candidates": rerun,
+    }
+
+
 def collect_low_conf(results, threshold: float) -> list:
     """收集平均置信度低于阈值的结果（仅对有置信度信息的文件生效）。
 
@@ -941,6 +974,14 @@ def main(argv=None):
         else:
             print(f"[提示] 仅写出状态为 {','.join(status_filter)} 的逐文件/合并产物（审计文件仍含全部结果）")
     write_outputs(results, args.output, args.format, combine=args.combine, status_filter=status_filter)
+    # R1 新能力：写出机器可读运行报告（含各状态文件清单 + 建议重跑清单），
+    # 弥补 summary 只给计数、不给具体文件的隐性可观测性缺口。
+    if args.report:
+        report = build_run_report(results)
+        Path(args.report).write_text(
+            json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        print(f"[完成] 已写出运行报告：{args.report}")
     ok = sum(1 for r in results if r["status"] == "ok")
     errored = sum(1 for r in results if r["status"] == "error")
     print(f"[汇总] 成功 {ok}/{len(results)}，结果见：{args.output}")

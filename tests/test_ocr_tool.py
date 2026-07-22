@@ -859,3 +859,43 @@ def test_write_combined_respects_status_filter(tmp_path):
     txt = path.read_text(encoding="utf-8")
     assert "成功一" in txt and "成功二" in txt
     assert "c.png" not in txt and "被过滤" not in txt
+
+
+def test_build_run_report_groups_files(tmp_path):
+    """R1 新需求验证：build_run_report 应给出各状态文件清单与建议重跑清单。"""
+    results = [
+        {"file": "a.png", "text": "x", "chars": 1, "status": "ok", "elapsed": 0.1},
+        {"file": "b.png", "text": "", "chars": 0, "status": "empty", "elapsed": 0.0},
+        {"file": "c.png", "text": "短", "chars": 1, "status": "filtered", "elapsed": 0.1},
+        {"file": "d.png", "text": "", "chars": 0, "status": "error", "elapsed": 0.0, "error": "boom"},
+    ]
+    rep = ocr_tool.build_run_report(results)
+    assert rep["counts"]["ok"] == 1
+    assert set(rep["by_status"]["empty"]) == {"b.png"}
+    assert set(rep["by_status"]["filtered"]) == {"c.png"}
+    assert set(rep["by_status"]["error"]) == {"d.png"}
+    # 建议重跑 = empty / filtered / error 三类
+    assert set(rep["rerun_candidates"]) == {"b.png", "c.png", "d.png"}
+
+
+def test_main_report_writes_json(tmp_path, capsys):
+    """R1 新需求端到端：--report 把运行报告写入指定 JSON 文件。"""
+    import json as _json
+
+    (tmp_path / "a.png").write_bytes(b"x")
+    (tmp_path / "b.png").write_bytes(b"x")
+    out = tmp_path / "out"
+    rep_path = tmp_path / "report.json"
+    rc = ocr_tool.main([
+        "--input", str(tmp_path), "--output", str(out), "--mock",
+        "--min-chars", "9999", "--report", str(rep_path),
+    ])
+    assert rc == 0
+    rep = _json.loads(rep_path.read_text(encoding="utf-8"))
+    assert rep["counts"]["filtered"] == 2
+    # 建议重跑清单应包含两个被过滤（短文本）的文件（file 为完整路径）
+    assert len(rep["rerun_candidates"]) == 2
+    assert set(rep["rerun_candidates"]) == {
+        str(tmp_path / "a.png"), str(tmp_path / "b.png")
+    }
+    assert "已写出运行报告" in capsys.readouterr().out
