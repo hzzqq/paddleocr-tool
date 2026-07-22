@@ -1002,3 +1002,42 @@ def test_main_glob_end_to_end_mock(tmp_path, capsys):
     assert (out / "a.txt").exists()
     assert (out / "b.txt").exists()
     assert not (out / "c.txt").exists()
+
+
+def test_collect_files_max_size(tmp_path):
+    """R1 验证：--max-size 跳过超过体积上限的文件，仅保留较小者。"""
+    small = tmp_path / "small.png"
+    small.write_bytes(b"x" * 100)
+    big = tmp_path / "big.png"
+    big.write_bytes(b"x" * 10000)
+    files, skipped = ocr_tool.collect_files(
+        str(tmp_path), recursive=False, max_size=1000
+    )
+    names = {f.name for f in files}
+    assert names == {"small.png"}
+    assert "big.png" in {s.name for s in skipped}
+
+
+def test_collect_files_max_size_single_file(tmp_path):
+    """R2 验证：单文件输入超过 --max-size 应计入跳过（而非被处理）。"""
+    big = tmp_path / "big.png"
+    big.write_bytes(b"x" * 5000)
+    files, skipped = ocr_tool.collect_files(
+        str(big), recursive=False, max_size=1000
+    )
+    assert files == []
+    assert len(skipped) == 1
+
+
+def test_main_max_size_end_to_end_mock(tmp_path, capsys):
+    """R1 端到端验证：mock 批处理中 --max-size 仅处理较小的图片。"""
+    out = tmp_path / "out"
+    (tmp_path / "small.png").write_bytes(b"x" * 100)
+    (tmp_path / "big.png").write_bytes(b"x" * 10000)
+    rc = ocr_tool.main([
+        "--input", str(tmp_path), "--output", str(out),
+        "--mock", "--format", "txt", "--max-size", "1000",
+    ])
+    assert rc == 0
+    assert (out / "small.txt").exists()
+    assert not (out / "big.txt").exists()

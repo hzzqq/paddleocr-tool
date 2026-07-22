@@ -94,6 +94,8 @@ def parse_args(argv=None):
                         help="递归遍历子目录")
     parser.add_argument("--max-depth", type=int, default=0,
                         help="递归深度上限（仅 --recursive 生效，>=1；1=只取顶层，0=不限），避免大目录树下钻过深")
+    parser.add_argument("--max-size", type=int, default=0,
+                        help="跳过超过该体积（字节）的文件（0 表示不限制），避免超大扫描件/图片拖垮内存或后端")
     parser.add_argument("--backend", choices=["paddle", "tesseract"],
                         default="paddle", help="OCR 后端，默认 paddle")
     parser.add_argument("--mock", action="store_true",
@@ -142,16 +144,18 @@ def _name_matches(name: str, include: str) -> bool:
     return include in name or fnmatch.fnmatch(name, include)
 
 
-def collect_files(input_path, recursive, include=None, exts=None, max_depth=None):
+def collect_files(input_path, recursive, include=None, exts=None, max_depth=None, max_size=None):
     """收集需要处理的文件列表（图片 + PDF）。
 
     返回 (文件列表, 跳过列表)。跳过列表包含不支持类型 / 隐藏文件 / 隐藏目录 /
-    未命中 --include / 未命中 --ext，便于调用方透明提示。
+    未命中 --include / 未命中 --ext / 超过 --max-size，便于调用方透明提示。
 
     exts：可选扩展名白名单（小写，含点），提供时覆盖默认 IMAGE/PDF 白名单，
     仅处理落在该集合内的文件（R1 新能力，与 --include 的「文件名/子串」维度互补）。
     max_depth：可选递归深度上限（仅 recursive 时生效，>=1）；限制相对输入根
     目录的目录层级，1 表示只取顶层。None / <=0 表示不限（R1 新能力）。
+    max_size：可选体积上限（字节，>0 生效）；超过该大小的文件被跳过，避免
+    超大扫描件 / 图片把内存 / 后端拖垮（R1 新能力 + R2 隐性健壮性护栏）。
     """
     p = Path(input_path)
     files = []
@@ -162,7 +166,10 @@ def collect_files(input_path, recursive, include=None, exts=None, max_depth=None
     if p.is_file():
         ext = p.suffix.lower()
         if ext in allowed_exts and _name_matches(p.name, include):
-            files.append(p)
+            if max_size and max_size > 0 and _safe_size(p) > max_size:
+                skipped.append(p)  # 超过体积上限
+            else:
+                files.append(p)
         else:
             skipped.append(p)  # 类型不支持 / 未命中过滤
         return files, skipped
@@ -192,6 +199,9 @@ def collect_files(input_path, recursive, include=None, exts=None, max_depth=None
         ext = f.suffix.lower()
         if ext in allowed_exts:
             if _name_matches(f.name, include):
+                if max_size and max_size > 0 and _safe_size(f) > max_size:
+                    skipped.append(f)  # 超过体积上限
+                    continue
                 files.append(f)
             else:
                 skipped.append(f)  # 未命中 --include
@@ -229,11 +239,11 @@ def _safe_size(p) -> int:
         return 0
 
 
-def collect_all(input_spec, recursive, include=None, exts=None, max_depth=None):
+def collect_all(input_spec, recursive, include=None, exts=None, max_depth=None, max_size=None):
     """支持 `--input` 传入多个路径（逗号 / 换行分隔），聚合去重。
 
     单路径时等价于 collect_files；多路径用于一次性批量处理若干分散文件 / 目录。
-    max_depth 透传给 collect_files（递归深度上限，详见 collect_files）。
+    max_depth / max_size 透传给 collect_files（递归深度上限 / 体积上限）。
 
     R1 新能力：各路径片段支持 glob 模式（如 `dir/*.png`、`imgs/**/*.jpg`），
     自动展开为匹配文件逐个处理，省去用户先 `ls` 再粘贴文件列表。
@@ -253,7 +263,8 @@ def collect_all(input_spec, recursive, include=None, exts=None, max_depth=None):
             if matched:
                 for m in matched:
                     f, s = collect_files(
-                        m, recursive, include=include, exts=exts, max_depth=max_depth
+                        m, recursive, include=include, exts=exts,
+                        max_depth=max_depth, max_size=max_size,
                     )
                     files.extend(f)
                     skipped.extend(s)
@@ -263,7 +274,8 @@ def collect_all(input_spec, recursive, include=None, exts=None, max_depth=None):
                 skipped.append(Path(part))
                 continue
         f, s = collect_files(
-            part, recursive, include=include, exts=exts, max_depth=max_depth
+            part, recursive, include=include, exts=exts,
+            max_depth=max_depth, max_size=max_size,
         )
         files.extend(f)
         skipped.extend(s)
@@ -969,14 +981,14 @@ def main(argv=None):
 
     files, skipped = collect_all(
         args.input, args.recursive, include=args.include, exts=args.ext,
-        max_depth=args.max_depth,
+        max_depth=args.max_depth, max_size=args.max_size,
     )
     if not files:
         # 隐性可观测性：原实现把 collect_all 返回的 skipped 直接丢弃，
         # 用户只能看到「未找到」却不知为何被排除；这里显式说明跳过情况。
         if skipped:
             example = skipped[0].name
-            print(f"[提示] 未找到可处理的图片 / PDF 文件；另有 {len(skipped)} 个文件因类型不支持或隐藏被跳过（例如：{example}）。")
+            print(f"[提示] 未找到可处理的图片 / PDF 文件；另有 {len(skipped)} 个文件因类型不支持、隐藏或超过体积上限被跳过（例如：{example}）。")
         else:
             print("[提示] 未找到可处理的图片 / PDF 文件。")
         # 仍创建输出目录，避免下游报错（dry-run 无 --output 时跳过）
