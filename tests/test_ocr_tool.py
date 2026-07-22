@@ -301,3 +301,31 @@ def test_main_jsonl_format(tmp_path):
     # md 逐文件产物不应在 jsonl 模式下写出
     assert not (out / "a.md").exists()
 
+
+def test_quiet_suppresses_progress(tmp_path, capsys):
+    """R1 新需求验证：--quiet 不打印逐文件进度。"""
+    img = tmp_path / "a.png"
+    img.write_bytes(b"fake")
+    out = tmp_path / "out"
+    rc = ocr_tool.main([
+        "--input", str(img), "--output", str(out), "--mock", "--quiet",
+    ])
+    assert rc == 0
+    out_text = capsys.readouterr().out
+    assert "[进度]" not in out_text
+    # 关键结果（完成/汇总）仍应输出
+    assert "results.json" in out_text
+
+
+def test_main_surfaces_skipped_when_no_files(tmp_path, capsys):
+    """R2 隐性可观测性验证：无可处理文件但存在被跳过的文件时，应说明跳过原因。"""
+    (tmp_path / "note.txt").write_text("not an image")
+    out = tmp_path / "out"
+    rc = ocr_tool.main(["--input", str(tmp_path), "--output", str(out), "--mock"])
+    assert rc == 0
+    out_text = capsys.readouterr().out
+    assert "跳过" in out_text
+    assert "note.txt" in out_text  # 给出被跳过文件的例子，避免「未找到」无下文
+    # 空结果产物仍应落盘（不崩溃）
+    assert (out / "results.json").exists()
+

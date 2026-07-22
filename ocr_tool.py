@@ -82,6 +82,8 @@ def parse_args(argv=None):
                         help="跳过已有输出结果的文件（按格式判断），便于断点续跑 / 增量重试，避免重复 OCR")
     parser.add_argument("--low-conf-threshold", type=float, default=-1.0,
                         help="平均置信度低于该值的文件写入 low_confidence.txt 清单（默认 -1 表示不生成；仅 paddle 后端有效）")
+    parser.add_argument("--quiet", action="store_true",
+                        help="静默模式：不打印逐文件进度，仅输出关键结果与错误（适合脚本/流水线）")
     return parser.parse_args(argv)
 
 
@@ -502,7 +504,13 @@ def main(argv=None):
 
     files, skipped = collect_all(args.input, args.recursive)
     if not files:
-        print("[提示] 未找到可处理的图片 / PDF 文件。")
+        # 隐性可观测性：原实现把 collect_all 返回的 skipped 直接丢弃，
+        # 用户只能看到「未找到」却不知为何被排除；这里显式说明跳过情况。
+        if skipped:
+            example = skipped[0].name
+            print(f"[提示] 未找到可处理的图片 / PDF 文件；另有 {len(skipped)} 个文件因类型不支持或隐藏被跳过（例如：{example}）。")
+        else:
+            print("[提示] 未找到可处理的图片 / PDF 文件。")
         # 仍创建输出目录，避免下游报错
         Path(args.output).mkdir(parents=True, exist_ok=True)
         write_outputs([], args.output, args.format)
@@ -549,11 +557,13 @@ def main(argv=None):
             futures = [ex.submit(process_file, f, recognizer, backend_name) for f in files]
             for i, fut in enumerate(futures, 1):
                 res = fut.result()
-                print(f"[进度] 完成 {i}/{len(files)}：{res['file']} ({res['status']})")
+                if not args.quiet:
+                    print(f"[进度] 完成 {i}/{len(files)}：{res['file']} ({res['status']})")
                 results.append(res)
     else:
         for i, f in enumerate(files, 1):
-            print(f"[进度] 处理第 {i}/{len(files)} 个：{f}")
+            if not args.quiet:
+                print(f"[进度] 处理第 {i}/{len(files)} 个：{f}")
             res = process_file(f, recognizer, backend_name)
             results.append(res)
 
