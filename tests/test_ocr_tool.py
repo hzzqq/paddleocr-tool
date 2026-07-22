@@ -329,3 +329,43 @@ def test_main_surfaces_skipped_when_no_files(tmp_path, capsys):
     # 空结果产物仍应落盘（不崩溃）
     assert (out / "results.json").exists()
 
+
+def test_collect_files_include_filter(tmp_path):
+    """R1 新需求验证：--include 只收集文件名匹配的文件。"""
+    (tmp_path / "cover.png").write_bytes(b"x")
+    (tmp_path / "page2.png").write_bytes(b"x")
+    (tmp_path / "other.jpg").write_bytes(b"x")
+    files, _ = ocr_tool.collect_files(str(tmp_path), recursive=False, include="*page*")
+    names = {f.name for f in files}
+    assert names == {"page2.png"}
+    # 子串匹配也应生效
+    files2, _ = ocr_tool.collect_files(str(tmp_path), recursive=False, include="cover")
+    assert {f.name for f in files2} == {"cover.png"}
+
+
+def test_main_include_narrows_files(tmp_path, capsys):
+    import json as _json
+
+    (tmp_path / "a.png").write_bytes(b"x")
+    (tmp_path / "b.png").write_bytes(b"x")
+    out = tmp_path / "out"
+    rc = ocr_tool.main([
+        "--input", str(tmp_path), "--output", str(out), "--mock", "--include", "a",
+    ])
+    assert rc == 0
+    data = _json.loads((out / "results.json").read_text(encoding="utf-8"))
+    assert [r["file"].endswith("a.png") for r in data] == [True]
+
+
+def test_main_warns_confidence_noop_on_mock(tmp_path, capsys):
+    """R2 隐性问题验证：--min-conf 在 mock 后端下静默失效，应给出提示。"""
+    img = tmp_path / "a.png"
+    img.write_bytes(b"fake")
+    out = tmp_path / "out"
+    rc = ocr_tool.main([
+        "--input", str(img), "--output", str(out), "--mock", "--min-conf", "0.5",
+    ])
+    assert rc == 0
+    out_text = capsys.readouterr().out
+    assert "仅 paddle 后端生效" in out_text
+

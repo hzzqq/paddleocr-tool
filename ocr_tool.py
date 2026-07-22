@@ -18,6 +18,7 @@ PaddleOCR 批量图文抽取工具（MVP）
 
 import argparse
 import csv
+import fnmatch
 import json
 import os
 import re
@@ -84,13 +85,22 @@ def parse_args(argv=None):
                         help="平均置信度低于该值的文件写入 low_confidence.txt 清单（默认 -1 表示不生成；仅 paddle 后端有效）")
     parser.add_argument("--quiet", action="store_true",
                         help="静默模式：不打印逐文件进度，仅输出关键结果与错误（适合脚本/流水线）")
+    parser.add_argument("--include", default=None,
+                        help="文件名过滤：只处理文件名匹配该子串或 glob 模式（如 '*page*' 或 '封面'）的文件")
     return parser.parse_args(argv)
 
 
-def collect_files(input_path, recursive):
+def _name_matches(name: str, include: str) -> bool:
+    """文件名是否匹配 --include（子串或 glob 任一命中即视为匹配）。"""
+    if not include:
+        return True
+    return include in name or fnmatch.fnmatch(name, include)
+
+
+def collect_files(input_path, recursive, include=None):
     """收集需要处理的文件列表（图片 + PDF）。
 
-    返回 (文件列表, 跳过列表)。跳过列表包含不支持类型 / 隐藏文件，便于调用方透明提示。
+    返回 (文件列表, 跳过列表)。跳过列表包含不支持类型 / 隐藏文件 / 未命中 --include，便于调用方透明提示。
     """
     p = Path(input_path)
     files = []
@@ -98,7 +108,10 @@ def collect_files(input_path, recursive):
     if p.is_file():
         ext = p.suffix.lower()
         if ext in IMAGE_EXTS or ext in PDF_EXTS:
-            files.append(p)
+            if _name_matches(p.name, include):
+                files.append(p)
+            else:
+                skipped.append(p)  # 不满足 --include
         else:
             skipped.append(p)  # 记录不支持的文件类型
         return files, skipped
@@ -116,16 +129,17 @@ def collect_files(input_path, recursive):
             skipped.append(f)  # 隐藏文件
             continue
         ext = f.suffix.lower()
-        if ext in IMAGE_EXTS:
-            files.append(f)
-        elif ext in PDF_EXTS:
-            files.append(f)
+        if ext in IMAGE_EXTS or ext in PDF_EXTS:
+            if _name_matches(f.name, include):
+                files.append(f)
+            else:
+                skipped.append(f)  # 未命中 --include
         else:
             skipped.append(f)  # 其他不支持类型
     return files, skipped
 
 
-def collect_all(input_spec, recursive):
+def collect_all(input_spec, recursive, include=None):
     """支持 `--input` 传入多个路径（逗号 / 换行分隔），聚合去重。
 
     单路径时等价于 collect_files；多路径用于一次性批量处理若干分散文件 / 目录。
@@ -136,7 +150,7 @@ def collect_all(input_spec, recursive):
         part = part.strip()
         if not part:
             continue
-        f, s = collect_files(part, recursive)
+        f, s = collect_files(part, recursive, include=include)
         files.extend(f)
         skipped.extend(s)
     # 去重并保持顺序
@@ -502,7 +516,7 @@ def main(argv=None):
     print(f"后端：{'mock' if args.mock else args.backend}　语言：{args.lang}　格式：{args.format}"
           f"　递归：{args.recursive}　并行：{args.workers}　最低置信度：{args.min_conf}")
 
-    files, skipped = collect_all(args.input, args.recursive)
+    files, skipped = collect_all(args.input, args.recursive, include=args.include)
     if not files:
         # 隐性可观测性：原实现把 collect_all 返回的 skipped 直接丢弃，
         # 用户只能看到「未找到」却不知为何被排除；这里显式说明跳过情况。
@@ -547,6 +561,12 @@ def main(argv=None):
         recognizer, backend_name = build_recognizer(args)
     except RuntimeError:
         return 1
+
+    # 隐性问题：--min-conf / --low-conf-threshold 仅 paddle 后端生效，
+    # 但 tesseract / mock 后端会静默忽略，用户误以为已过滤。这里给出明确提示。
+    if (args.min_conf > 0 or args.low_conf_threshold >= 0) and backend_name != "paddle":
+        print(f"[提示] 置信度相关选项（--min-conf / --low-conf-threshold）仅 paddle 后端生效，"
+              f"当前后端为 {backend_name}，这些选项不会生效。")
 
     print(f"[信息] 使用后端：{backend_name}，共 {len(files)} 个文件")
     results = []
