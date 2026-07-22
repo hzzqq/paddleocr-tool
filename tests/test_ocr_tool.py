@@ -369,3 +369,53 @@ def test_main_warns_confidence_noop_on_mock(tmp_path, capsys):
     out_text = capsys.readouterr().out
     assert "仅 paddle 后端生效" in out_text
 
+
+def test_write_outputs_emits_stats_json(tmp_path):
+    """R1 新需求：write_outputs 应额外写出机器可读的 stats.json 运行统计。"""
+    import json as _json
+
+    results = [
+        {"file": "a.png", "text": "你好世界", "chars": 4, "elapsed": 0.2,
+         "status": "ok", "error": "", "avg_conf": 0.9, "min_conf": 0.8},
+        {"file": "b.png", "text": "hi", "chars": 2, "elapsed": 0.1,
+         "status": "ok", "error": "", "avg_conf": 0.7, "min_conf": 0.6},
+        {"file": "c.png", "text": "", "chars": 0, "elapsed": 0.0,
+         "status": "error", "error": "boom", "avg_conf": None, "min_conf": None},
+    ]
+    ocr_tool.write_outputs(results, str(tmp_path), "md")
+    stats = _json.loads((tmp_path / "stats.json").read_text(encoding="utf-8"))
+    assert stats["total"] == 3
+    assert stats["ok"] == 2
+    assert stats["error"] == 1
+    assert stats["total_chars"] == 6
+    # 仅对有置信度的 ok 文件求平均：(0.9+0.7)/2 = 0.8
+    assert stats["avg_conf_overall"] == 0.8
+    assert stats["format"] == "md"
+    # 人读 summary 仍应同时产出
+    assert (tmp_path / "summary.txt").exists()
+
+
+def test_write_combined_skips_when_empty(tmp_path, capsys):
+    """R2 隐性问题：无成功结果时 write_combined 不应写出空合并文件，应跳过并提示。"""
+    results = [
+        {"file": "c.png", "text": "", "chars": 0, "elapsed": 0.0,
+         "status": "error", "error": "boom"},
+    ]
+    path = tmp_path / "_combined.md"
+    returned = ocr_tool.write_combined(results, str(tmp_path), "md")
+    assert returned is None
+    assert not path.exists()  # 不应留下误导性的空合并文件
+    assert "没有可合并的成功结果" in capsys.readouterr().out  # R2：明确提示已跳过
+
+
+def test_main_emits_stats_and_no_empty_combined(tmp_path, capsys):
+    """R1+R2 端到端：零可处理文件时仍产出 stats.json，且合并分支不写出空文件。"""
+    (tmp_path / "note.txt").write_text("not an image")
+    out = tmp_path / "out"
+    rc = ocr_tool.main([
+        "--input", str(tmp_path), "--output", str(out), "--mock", "--combine",
+    ])
+    assert rc == 0
+    assert (out / "stats.json").exists()  # R1：运行统计始终产出
+    assert not (out / "_combined.md").exists()  # R2：无内容时不应产生合并文件
+

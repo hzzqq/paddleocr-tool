@@ -407,6 +407,11 @@ def write_combined(results, output_dir, fmt):
             blocks.append(f"===== {src} =====\n{r['text']}")
         else:
             blocks.append(f"## {src}\n\n{r['text']}")
+    if not blocks:
+        # R2 隐性问题：原本会写出一个只含换行的空 _combined 文件，
+        # 误导用户「合并产物存在却有内容」。无成功结果时应跳过并提示。
+        print("[提示] 没有可合并的成功结果，已跳过合并文件输出。")
+        return None
     ext = "txt" if fmt == "txt" else "md"
     path = out_dir / f"_combined.{ext}"
     path.write_text("\n\n".join(blocks) + "\n", encoding="utf-8")
@@ -467,6 +472,26 @@ def write_outputs(results, output_dir, fmt, combine=False):
         f"输出格式：{fmt}",
     ]
     summary_path.write_text("\n".join(summary_lines) + "\n", encoding="utf-8")
+
+    # R1 新需求：机器可读的运行统计 stats.json（便于流水线/下游消费，
+    # 无需解析 summary.txt 文本）。与 summary.txt 互补：人读 vs 机读。
+    conf_vals = [r["avg_conf"] for r in results
+                 if isinstance(r.get("avg_conf"), (int, float))]
+    stats = {
+        "total": len(results),
+        "ok": ok,
+        "skipped_pdf": skipped,
+        "error": errored,
+        "total_chars": total_chars,
+        "total_time": total_time,
+        "avg_conf_overall": round(sum(conf_vals) / len(conf_vals), 3) if conf_vals else None,
+        "format": fmt,
+        "generated_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+    }
+    stats_path = output_dir / "stats.json"
+    with open(stats_path, "w", encoding="utf-8") as f:
+        json.dump(stats, f, ensure_ascii=False, indent=2)
+    print(f"[完成] 已写出运行统计：{stats_path}")
 
     # 可选：合并输出（把全部成功结果按序拼接成单个文件）
     if combine:
