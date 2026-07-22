@@ -35,13 +35,19 @@ with st.sidebar:
     backend = st.selectbox("OCR 后端", ["paddle", "tesseract"])
     workers = st.number_input("并行线程数", min_value=1, max_value=8, value=1, step=1)
     min_conf = st.slider("最低置信度（仅 paddle 生效）", 0.0, 1.0, 0.0, 0.05)
+    include = st.text_input("文件名过滤（--include，可选）", placeholder="如 *page* 或 封面")
     use_mock = st.checkbox("Mock 模式（无需 OCR 依赖，演示流程）", value=False)
     combine = st.checkbox("合并输出（生成 _combined.md/.txt）", value=False)
     dry_run = st.checkbox("仅预检（统计待处理文件，不执行 OCR）", value=False)
+    quiet = st.checkbox("静默模式（--quiet，减少逐文件日志）", value=False)
 
     start = st.button("开始识别", type="primary")
 
 if start:
+    # 隐性问题：最低置信度仅 paddle 后端生效，但 UI 允许在 tesseract 下设置，
+    # 用户会误以为已过滤。这里在运行前显式告警，避免「静默失效」的误导。
+    if backend != "paddle" and min_conf > 0:
+        st.warning("⚠️ 最低置信度仅在 paddle 后端生效；当前选择 tesseract，该选项不会生效。")
     if not input_dir or not output_dir:
         st.error("请先填写输入目录与输出目录。")
     elif not Path(input_dir).exists():
@@ -60,12 +66,16 @@ if start:
         ]
         if recursive:
             cmd.append("--recursive")
+        if include:
+            cmd += ["--include", include]
         if use_mock:
             cmd.append("--mock")
         if combine:
             cmd.append("--combine")
         if dry_run:
             cmd.append("--dry-run")
+        if quiet:
+            cmd.append("--quiet")
 
         log_box = st.empty()
         progress = st.progress(0, text="准备中…")

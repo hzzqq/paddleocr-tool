@@ -29,3 +29,17 @@ def test_ui_defensive_json_parse():
     assert "结果文件解析失败" in UI_SRC
     # 字段访问应走 .get，避免 KeyError
     assert 'item.get("file"' in UI_SRC
+
+
+def test_ui_exposes_include_and_quiet():
+    """R1 新需求验证：UI 暴露 --include / --quiet 开关并传给子进程。"""
+    assert '"--include"' in UI_SRC
+    assert '"--quiet"' in UI_SRC
+    assert "include =" in UI_SRC
+    assert "quiet =" in UI_SRC
+
+
+def test_ui_warns_min_conf_on_non_paddle():
+    """R2 隐性问题验证：tesseract 后端下设置 min_conf 时 UI 给出告警。"""
+    assert "最低置信度仅在 paddle 后端生效" in UI_SRC
+    assert "backend != \"paddle\"" in UI_SRC
