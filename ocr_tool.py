@@ -372,11 +372,30 @@ def process_file(file_path, recognizer, backend_name):
     }
 
 
+def _unique_path(output_dir, name: str):
+    """返回 output_dir 下不冲突的命名路径（R1 新能力 + R2 修复）。
+
+    原实现直接用 stem + 扩展名，当不同子目录存在同名文件
+    （如 a/x.png 与 b/x.png）时，二者都写 x.md，后者静默覆盖前者，
+    造成结果丢失且无任何提示。这里在冲突时追加 _2 / _3 … 后缀，
+    保证每个输入文件都有独立、不互相覆盖的输出。
+    """
+    out = Path(output_dir) / name
+    if not out.exists():
+        return out
+    stem, ext = out.stem, out.suffix
+    i = 2
+    while True:
+        cand = Path(output_dir) / f"{stem}_{i}{ext}"
+        if not cand.exists():
+            return cand
+        i += 1
+
+
 def write_markdown(result, output_dir):
     """写入单个文件的 .md 结果。"""
     src = Path(result["file"])
-    out_name = src.stem + ".md"
-    out_path = Path(output_dir) / out_name
+    out_path = _unique_path(output_dir, src.stem + ".md")
     meta = f"耗时：{result['elapsed']}s　状态：{result['status']}　字符数：{result['chars']}"
     if result.get("avg_conf") is not None:
         meta += f"　平均置信度：{result['avg_conf']}"
@@ -391,8 +410,7 @@ def write_markdown(result, output_dir):
 def write_text(result, output_dir):
     """写入单个文件的 .txt 纯文本结果（--format txt）。"""
     src = Path(result["file"])
-    out_name = src.stem + ".txt"
-    out_path = Path(output_dir) / out_name
+    out_path = _unique_path(output_dir, src.stem + ".txt")
     out_path.write_text(result["text"] + "\n", encoding="utf-8")
     return out_path
 

@@ -278,6 +278,22 @@ def test_process_file_empty_marked_not_ok(tmp_path):
     assert res["chars"] == 0
 
 
+def test_output_filename_collision_safe(tmp_path):
+    """R1 新需求验证：不同目录的同名文件输出不再静默覆盖。"""
+    out = tmp_path / "out"
+    out.mkdir()
+    # 模拟两个不同来源的同名文件（如 a/x.png 与 b/x.png）
+    r1 = {"file": "dirA/x.png", "text": "结果A", "chars": 3,
+           "elapsed": 0.1, "status": "ok", "error": ""}
+    r2 = {"file": "dirB/x.png", "text": "结果B", "chars": 3,
+           "elapsed": 0.1, "status": "ok", "error": ""}
+    p1 = ocr_tool.write_markdown(r1, out)
+    p2 = ocr_tool.write_markdown(r2, out)
+    assert p1 != p2                      # 必须落到不同文件
+    assert p1.read_text(encoding="utf-8").count("结果A") == 1
+    assert p2.read_text(encoding="utf-8").count("结果B") == 1
+
+
 def test_apply_min_chars_filters_noise():
     """R1 新需求验证：--min-chars 把过短的成功结果标记为 filtered。"""
     results = [
