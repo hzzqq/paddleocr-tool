@@ -928,3 +928,39 @@ def test_list_formats_returns_0_without_io_args(capsys):
     rc = ocr_tool.main(["--list-formats"])
     assert rc == 0
     assert "支持的" in capsys.readouterr().out
+
+
+def test_max_depth_limits_recursion(tmp_path):
+    """R1：--max-depth 限制递归深度，1 只取顶层、不进子目录。"""
+    (tmp_path / "top.png").write_bytes(b"x")
+    sub = tmp_path / "sub"
+    sub.mkdir()
+    (sub / "deep.png").write_bytes(b"x")
+    sub2 = sub / "nested"
+    sub2.mkdir()
+    (sub2 / "deeper.png").write_bytes(b"x")
+
+    # max-depth=1：仅顶层 top.png
+    files, skipped = ocr_tool.collect_files(str(tmp_path), recursive=True, max_depth=1)
+    names = {f.name for f in files}
+    assert names == {"top.png"}
+
+    # max-depth=2：顶层 + 一级子目录
+    files2, _ = ocr_tool.collect_files(str(tmp_path), recursive=True, max_depth=2)
+    names2 = {f.name for f in files2}
+    assert names2 == {"top.png", "deep.png"}
+
+    # max-depth=0 / None：不限深度（全量）
+    files_all, _ = ocr_tool.collect_files(str(tmp_path), recursive=True, max_depth=0)
+    assert {f.name for f in files_all} == {"top.png", "deep.png", "deeper.png"}
+
+
+def test_dry_run_without_output(tmp_path, capsys):
+    """R2 修复：--dry-run 预检不应要求 --output，返回 0 并打印待处理文件统计。"""
+    (tmp_path / "a.png").write_bytes(b"x")
+    (tmp_path / "b.png").write_bytes(b"x")
+    rc = ocr_tool.main(["--input", str(tmp_path), "--dry-run", "--mock"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "dry-run" in out
+    assert "2" in out  # 两个待处理文件

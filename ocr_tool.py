@@ -92,6 +92,8 @@ def parse_args(argv=None):
                         default="md", help="输出格式，默认 md（txt 为逐文件纯文本，jsonl 为每行一条 JSON）")
     parser.add_argument("--recursive", action="store_true",
                         help="递归遍历子目录")
+    parser.add_argument("--max-depth", type=int, default=0,
+                        help="递归深度上限（仅 --recursive 生效，>=1；1=只取顶层，0=不限），避免大目录树下钻过深")
     parser.add_argument("--backend", choices=["paddle", "tesseract"],
                         default="paddle", help="OCR 后端，默认 paddle")
     parser.add_argument("--mock", action="store_true",
@@ -140,7 +142,7 @@ def _name_matches(name: str, include: str) -> bool:
     return include in name or fnmatch.fnmatch(name, include)
 
 
-def collect_files(input_path, recursive, include=None, exts=None):
+def collect_files(input_path, recursive, include=None, exts=None, max_depth=None):
     """收集需要处理的文件列表（图片 + PDF）。
 
     返回 (文件列表, 跳过列表)。跳过列表包含不支持类型 / 隐藏文件 / 隐藏目录 /
@@ -148,6 +150,8 @@ def collect_files(input_path, recursive, include=None, exts=None):
 
     exts：可选扩展名白名单（小写，含点），提供时覆盖默认 IMAGE/PDF 白名单，
     仅处理落在该集合内的文件（R1 新能力，与 --include 的「文件名/子串」维度互补）。
+    max_depth：可选递归深度上限（仅 recursive 时生效，>=1）；限制相对输入根
+    目录的目录层级，1 表示只取顶层。None / <=0 表示不限（R1 新能力）。
     """
     p = Path(input_path)
     files = []
@@ -193,6 +197,11 @@ def collect_files(input_path, recursive, include=None, exts=None):
                 skipped.append(f)  # 未命中 --include
         else:
             skipped.append(f)  # 其他不支持类型
+    # R1 新能力：递归深度上限（仅 recursive 时生效，>=1）。
+    # 限制相对输入根目录的层级，1 表示只取顶层，避免 --recursive 在大目录树里
+    # 无差别下钻过深、把无关子目录也卷进批处理。None / <=0 表示不限。
+    if recursive and max_depth and max_depth > 0:
+        files = [f for f in files if len(f.relative_to(p).parts) <= max_depth]
     return files, skipped
 
 
@@ -220,10 +229,11 @@ def _safe_size(p) -> int:
         return 0
 
 
-def collect_all(input_spec, recursive, include=None, exts=None):
+def collect_all(input_spec, recursive, include=None, exts=None, max_depth=None):
     """支持 `--input` 传入多个路径（逗号 / 换行分隔），聚合去重。
 
     单路径时等价于 collect_files；多路径用于一次性批量处理若干分散文件 / 目录。
+    max_depth 透传给 collect_files（递归深度上限，详见 collect_files）。
     """
     files = []
     skipped = []
@@ -231,7 +241,9 @@ def collect_all(input_spec, recursive, include=None, exts=None):
         part = part.strip()
         if not part:
             continue
-        f, s = collect_files(part, recursive, include=include, exts=exts)
+        f, s = collect_files(
+            part, recursive, include=include, exts=exts, max_depth=max_depth
+        )
         files.extend(f)
         skipped.extend(s)
     # 去重并保持顺序
@@ -908,9 +920,16 @@ def main(argv=None):
     if args.list_backends:
         print(format_backends_list())
         return 0
-    # 缺少必要参数时给出明确错误（--input/--output 在 --lang-list 外为必填）
-    if not args.input or not args.output:
-        print("[错误] 缺少 --input 或 --output 参数。运行 --lang-list 可查看支持的语言。")
+    # 缺少必要参数时给出明确错误。
+    # R2 修复（隐性 UX 缺陷）：--dry-run 仅做预检、不需要 --output，但原实现
+    # 把「缺少 --output」放在 --dry-run 处理之前，导致 `ocr --dry-run --input dir`
+    # 被「缺少 --output」误拦截而报错。现改为：--input 始终必填；--output 仅在
+    # 非 dry-run 时必填（R1 的 --list-* 信息标志已在更靠前提前返回）。
+    if not args.input:
+        print("[错误] 缺少 --input 参数。运行 --lang-list 可查看支持的语言。")
+        return 1
+    if not args.dry_run and not args.output:
+        print("[错误] 缺少 --output 参数（--dry-run 预检模式可省略 --output）。")
         return 1
     # R2 修复：未知语言代码显式告警（此前会静默透传、报错晦涩或静默用错语言）
     if args.lang not in SUPPORTED_LANGS:
@@ -927,7 +946,10 @@ def main(argv=None):
     print(f"后端：{'mock' if args.mock else args.backend}　语言：{args.lang}　格式：{args.format}"
           f"　递归：{args.recursive}　并行：{args.workers}　最低置信度：{args.min_conf}")
 
-    files, skipped = collect_all(args.input, args.recursive, include=args.include, exts=args.ext)
+    files, skipped = collect_all(
+        args.input, args.recursive, include=args.include, exts=args.ext,
+        max_depth=args.max_depth,
+    )
     if not files:
         # 隐性可观测性：原实现把 collect_all 返回的 skipped 直接丢弃，
         # 用户只能看到「未找到」却不知为何被排除；这里显式说明跳过情况。
@@ -936,9 +958,10 @@ def main(argv=None):
             print(f"[提示] 未找到可处理的图片 / PDF 文件；另有 {len(skipped)} 个文件因类型不支持或隐藏被跳过（例如：{example}）。")
         else:
             print("[提示] 未找到可处理的图片 / PDF 文件。")
-        # 仍创建输出目录，避免下游报错
-        Path(args.output).mkdir(parents=True, exist_ok=True)
-        write_outputs([], args.output, args.format)
+        # 仍创建输出目录，避免下游报错（dry-run 无 --output 时跳过）
+        if args.output:
+            Path(args.output).mkdir(parents=True, exist_ok=True)
+            write_outputs([], args.output, args.format)
         return 0
 
     # 断点续跑：跳过已有结果的文件（避免重复 OCR 浪费）
