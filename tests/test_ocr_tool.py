@@ -466,3 +466,66 @@ def test_main_emits_stats_and_no_empty_combined(tmp_path, capsys):
     assert (out / "stats.json").exists()  # R1：运行统计始终产出
     assert not (out / "_combined.md").exists()  # R2：无内容时不应产生合并文件
 
+
+def test_resolve_lang_known_maps_per_backend():
+    """R2 修复验证：已知语言按后端解析为正确引擎代码。"""
+    assert ocr_tool.resolve_lang("fr", "paddle") == "french"
+    assert ocr_tool.resolve_lang("fr", "tesseract") == "fra"   # 此前会原样传 "fr" 导致失败
+    assert ocr_tool.resolve_lang("ch", "tesseract") == "chi_sim+eng"
+    assert ocr_tool.resolve_lang("en", "tesseract") == "eng"
+
+
+def test_resolve_lang_unknown_passthrough():
+    """未知语言原样透传（由后端决定，并在 main 中告警）。"""
+    assert ocr_tool.resolve_lang("zzz", "paddle") == "zzz"
+    assert ocr_tool.resolve_lang("zzz", "tesseract") == "zzz"
+
+
+def test_format_lang_list_contains_default():
+    """R1 新需求：--lang-list 文本应含默认语言与多个官方支持代码。"""
+    text = ocr_tool.format_lang_list()
+    assert "ch" in text and "fr" in text and "fra" in text
+    assert ocr_tool.DEFAULT_LANG in text
+
+
+def test_main_lang_list_returns_zero(tmp_path, capsys):
+    """R1 新需求验证：--lang-list 仅列出语言并退出，无需 --input/--output。"""
+    rc = ocr_tool.main(["--lang-list"])
+    assert rc == 0
+    out_text = capsys.readouterr().out
+    assert "支持的识别语言" in out_text
+    assert "fra" in out_text  # tesseract 映射
+
+
+def test_main_invalid_lang_warns(tmp_path, capsys):
+    """R2 修复验证：未知 --lang 应显式告警，而非静默透传。"""
+    img = tmp_path / "a.png"
+    img.write_bytes(b"fake")
+    out = tmp_path / "out"
+    rc = ocr_tool.main([
+        "--input", str(img), "--output", str(out), "--mock", "--lang", "chh",
+    ])
+    assert rc == 0
+    out_text = capsys.readouterr().out
+    assert "不在官方支持列表" in out_text
+    assert "chh" in out_text
+
+
+def test_main_valid_lang_no_warning(tmp_path, capsys):
+    """已知语言（en）不应触发未知语言告警。"""
+    img = tmp_path / "a.png"
+    img.write_bytes(b"fake")
+    out = tmp_path / "out"
+    rc = ocr_tool.main([
+        "--input", str(img), "--output", str(out), "--mock", "--lang", "en",
+    ])
+    assert rc == 0
+    out_text = capsys.readouterr().out
+    assert "不在官方支持列表" not in out_text
+
+
+def test_main_missing_required_args_returns_error():
+    """可观测性：未提供 --input/--output 时给出明确错误码 1。"""
+    rc = ocr_tool.main([])
+    assert rc == 1
+

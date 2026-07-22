@@ -35,6 +35,25 @@ PDF_EXTS = {".pdf"}
 # 并行线程数安全上限（防止 --workers 过大耗尽系统资源）
 MAX_WORKERS = 16
 
+# 官方支持的语言代码表（覆盖 PaddleOCR 与 tesseract 两套后端的映射）。
+# R1 新能力：--lang-list 列出本表；R2 修复：此前 --lang 为任意字符串，
+# 拼写错误（如 chh）会原样透传给后端、报错信息晦涩或静默用错语言，
+# 现对未知语言显式告警，并对已知语言按后端解析为正确的引擎代码
+# （例如 tesseract 的 fr 应解析为 fra，而非原样传 "fr" 导致识别失败）。
+SUPPORTED_LANGS = {
+    "ch": {"paddle": "ch", "tesseract": "chi_sim+eng", "name": "简体中文"},
+    "en": {"paddle": "en", "tesseract": "eng", "name": "英语"},
+    "fr": {"paddle": "french", "tesseract": "fra", "name": "法语"},
+    "de": {"paddle": "german", "tesseract": "deu", "name": "德语"},
+    "ja": {"paddle": "japan", "tesseract": "jpn", "name": "日语"},
+    "ko": {"paddle": "korean", "tesseract": "kor", "name": "韩语"},
+    "ru": {"paddle": "russian", "tesseract": "rus", "name": "俄语"},
+    "es": {"paddle": "spanish", "tesseract": "spa", "name": "西班牙语"},
+    "pt": {"paddle": "portuguese", "tesseract": "por", "name": "葡萄牙语"},
+    "it": {"paddle": "italian", "tesseract": "ita", "name": "意大利语"},
+}
+DEFAULT_LANG = "ch"
+
 # 各后端缺失时的安装提示
 INSTALL_HINTS = {
     "paddle": "请安装 PaddleOCR：pip install paddleocr paddlepaddle\n"
@@ -57,12 +76,14 @@ def parse_args(argv=None):
     parser = argparse.ArgumentParser(
         description="PaddleOCR 批量图文抽取工具（MVP）"
     )
-    parser.add_argument("--input", required=True,
-                        help="输入目录或单个文件（图片或 PDF）")
-    parser.add_argument("--output", required=True,
-                        help="输出目录")
-    parser.add_argument("--lang", default="ch",
-                        help="识别语言，默认 ch（中文）。tesseract 可用 chi_sim 等")
+    parser.add_argument("--input", required=False, default=None,
+                        help="输入目录或单个文件（图片或 PDF）；--lang-list 时可选")
+    parser.add_argument("--output", required=False, default=None,
+                        help="输出目录；--lang-list 时可选")
+    parser.add_argument("--lang", default=DEFAULT_LANG,
+                        help=f"识别语言，默认 {DEFAULT_LANG}（中文）。运行 --lang-list 查看全部支持代码")
+    parser.add_argument("--lang-list", action="store_true",
+                        help="列出所有官方支持的识别语言代码（含两套后端映射）并退出")
     parser.add_argument("--format", choices=["md", "json", "csv", "txt", "jsonl"],
                         default="md", help="输出格式，默认 md（txt 为逐文件纯文本，jsonl 为每行一条 JSON）")
     parser.add_argument("--recursive", action="store_true",
@@ -89,6 +110,8 @@ def parse_args(argv=None):
                         help="文件名过滤：只处理文件名匹配该子串或 glob 模式（如 '*page*' 或 '封面'）的文件")
     parser.add_argument("--min-chars", type=int, default=0,
                         help="识别字符数低于该值的「成功」结果标记为 filtered（噪声过滤，不计入成功数/合并）")
+    parser.add_argument("--max-files", type=int, default=0,
+                        help="最多处理的文件数（0 表示不限制），便于对大目录做抽样 / 试跑")
     return parser.parse_args(argv)
 
 
@@ -269,14 +292,14 @@ def recognize_paddle(recognizer_cls, image_input, lang, min_conf=0.0):
 
 
 def recognize_tesseract(pytesseract, Image, image_input, lang):
-    """用 pytesseract 识别单张图片。"""
+    """用 pytesseract 识别单张图片。lang 应为已解析的 tesseract 引擎代码。"""
     if hasattr(image_input, "save"):
         img = image_input
     else:
         img = Image.open(str(image_input))
-    # tesseract 语言映射：ch -> chi_sim
-    tlang = "chi_sim+eng" if lang in ("ch", "chi_sim") else lang
-    return pytesseract.image_to_string(img, lang=tlang), None
+    # R2 修复：lang 已在 build_recognizer 中经 resolve_lang 解析为正确引擎代码
+    # （如 fr -> fra），不再在此做局部、不完整（仅 ch/chi_sim）的硬编码映射。
+    return pytesseract.image_to_string(img, lang=lang), None
 
 
 def recognize_mock(image_input, lang):
@@ -284,6 +307,29 @@ def recognize_mock(image_input, lang):
     name = getattr(image_input, "filename", str(image_input))
     return (f"[MOCK] 这是 {Path(str(name)).name} 的模拟识别文本（语言={lang}）。\n"
             f"欢迎使用 PaddleOCR 批量图文抽取工具。", None)
+
+
+def resolve_lang(lang: str, backend: str) -> str:
+    """将用户传入的 --lang 解析为对应后端的引擎代码。
+
+    R2 修复：tesseract 后端此前只对 ch/chi_sim 做映射，其他语言
+    （如 fr）会原样透传成 "fr"，而 tesseract 实际代码是 "fra"，导致识别失败。
+    现统一经 SUPPORTED_LANGS 映射；未知语言原样透传（由后端决定，并在 main 中告警）。
+    """
+    info = SUPPORTED_LANGS.get(lang)
+    if info is None:
+        return lang
+    return info.get(backend, info["paddle"])
+
+
+def format_lang_list() -> str:
+    """返回 --lang-list 的可读表格文本（纯函数，便于单测）。"""
+    lines = ["支持的识别语言（--lang 取值）：",
+             f"{'代码':<6}{'名称':<10}{'PaddleOCR':<12}{'tesseract'}"]
+    for code, info in SUPPORTED_LANGS.items():
+        lines.append(f"{code:<6}{info['name']:<10}{info['paddle']:<12}{info['tesseract']}")
+    lines.append(f"\n默认语言：{DEFAULT_LANG}（{SUPPORTED_LANGS[DEFAULT_LANG]['name']}）")
+    return "\n".join(lines)
 
 
 def build_recognizer(args):
@@ -301,7 +347,8 @@ def build_recognizer(args):
             print(f"[降级] 无法加载 PaddleOCR 后端：\n{e}")
             print("[降级] 程序不会崩溃，请按提示安装后重试；或使用 --backend tesseract 或 --mock。")
             raise
-        return (lambda img: recognize_paddle(cls, img, args.lang, args.min_conf), "paddle")
+        plang = resolve_lang(args.lang, "paddle")
+        return (lambda img: recognize_paddle(cls, img, plang, args.min_conf), "paddle")
 
     if args.backend == "tesseract":
         try:
@@ -309,7 +356,8 @@ def build_recognizer(args):
         except RuntimeError as e:
             print(f"[错误] 无法加载 tesseract 后端：\n{e}")
             raise
-        return (lambda img: recognize_tesseract(pytesseract, Image, img, args.lang), "tesseract")
+        tlang = resolve_lang(args.lang, "tesseract")
+        return (lambda img: recognize_tesseract(pytesseract, Image, img, tlang), "tesseract")
 
 
 def process_file(file_path, recognizer, backend_name):
@@ -572,6 +620,18 @@ def collect_low_conf(results, threshold: float) -> list:
 
 def main(argv=None):
     args = parse_args(argv)
+    # R1 新能力：--lang-list 仅列出支持的语言即退出，不要求 --input/--output
+    if args.lang_list:
+        print(format_lang_list())
+        return 0
+    # 缺少必要参数时给出明确错误（--input/--output 在 --lang-list 外为必填）
+    if not args.input or not args.output:
+        print("[错误] 缺少 --input 或 --output 参数。运行 --lang-list 可查看支持的语言。")
+        return 1
+    # R2 修复：未知语言代码显式告警（此前会静默透传、报错晦涩或静默用错语言）
+    if args.lang not in SUPPORTED_LANGS:
+        print(f"[提示] 语言代码 '{args.lang}' 不在官方支持列表，请运行 --lang-list 查看；"
+              f"将按原样传给后端，可能因不支持而失败。")
     # 安全护栏：限制并行线程数，避免 --workers 过大耗尽系统资源
     if args.workers > MAX_WORKERS:
         print(f"[提示] --workers 超过安全上限 {MAX_WORKERS}，已自动限制为 {MAX_WORKERS}")
@@ -611,6 +671,14 @@ def main(argv=None):
         if not files:
             print("✅ 全部文件已有识别结果，无需重复处理。")
             return 0
+
+    # 抽样 / 试跑：限制处理文件数（默认 0 不限制）。超出部分计入 skipped 保持透明。
+    if args.max_files and args.max_files > 0 and len(files) > args.max_files:
+        extra = files[args.max_files:]
+        files = files[:args.max_files]
+        skipped.extend(extra)
+        print(f"[提示] --max-files {args.max_files}：仅处理前 {args.max_files} 个文件，"
+              f"其余 {len(extra)} 个计入跳过。")
 
     if args.dry_run:
         # 预检模式：只统计待处理文件，不执行 OCR（新能力 + 可观测性）
