@@ -290,6 +290,42 @@ def test_write_combined_txt_extension(tmp_path):
     assert "===== a.png =====" in path.read_text(encoding="utf-8")
 
 
+def test_write_combined_respects_format_json_and_jsonl(tmp_path):
+    """R1 新能力：--format json/jsonl 的合并文件应为对应格式，而非 _combined.md。
+    R2 验证：此前无论何种格式都只写 _combined.md，json 流水线混入多余 md。"""
+    results = [
+        {"file": "a.png", "text": "甲", "chars": 1,
+         "elapsed": 0.1, "status": "ok", "error": ""},
+        {"file": "b.png", "text": "乙", "chars": 1,
+         "elapsed": 0.1, "status": "ok", "error": ""},
+    ]
+    p_json = ocr_tool.write_combined(results, str(tmp_path), "json")
+    assert p_json.name == "_combined.json"
+    arr = json.loads(p_json.read_text(encoding="utf-8"))
+    assert isinstance(arr, list) and len(arr) == 2
+    assert (tmp_path / "_combined.md").exists() is False  # 不产生多余 md
+
+    p_jsonl = ocr_tool.write_combined(results, str(tmp_path / "jl"), "jsonl")
+    assert p_jsonl.name == "_combined.jsonl"
+    lines = p_jsonl.read_text(encoding="utf-8").strip().splitlines()
+    assert len(lines) == 2
+    assert json.loads(lines[0])["file"] == "a.png"
+
+
+def test_write_combined_respects_format_csv(tmp_path):
+    """R1 新能力：--format csv 的合并文件应为 _combined.csv（与 results.csv 同表头）。"""
+    results = [
+        {"file": "a.png", "text": "甲", "chars": 1,
+         "elapsed": 0.1, "status": "ok", "error": "",
+         "avg_conf": None, "min_conf": None},
+    ]
+    p_csv = ocr_tool.write_combined(results, str(tmp_path), "csv")
+    assert p_csv.name == "_combined.csv"
+    content = p_csv.read_text(encoding="utf-8-sig")
+    assert "file" in content and "a.png" in content
+    assert (tmp_path / "_combined.md").exists() is False
+
+
 def test_main_combine_and_workers_cap(tmp_path, capsys):
     """R1 新需求 + R2 隐性安全：--combine 生成合并文件；--workers 超限被钳制。"""
     img = tmp_path / "a.png"

@@ -548,30 +548,55 @@ def write_text(result, output_dir):
 
 
 def write_combined(results, output_dir, fmt):
-    """把所有成功结果按文件顺序拼接成单个合并文件。
+    """把所有成功结果按文件顺序拼接成单个合并文件，格式跟随 fmt。
 
-    合并文件格式跟随 fmt：fmt 为 txt 时输出 _combined.txt（纯文本段），
-    其余情况输出 _combined.md（以文件名作小标题）。error/skipped 的结果不计入合并。
+    合并文件格式：
+    - md    -> _combined.md（以文件名作小标题）
+    - txt   -> _combined.txt（纯文本段）
+    - json  -> _combined.json（结果数组）
+    - jsonl -> _combined.jsonl（每行一条 JSON）
+    - csv   -> _combined.csv（与 results.csv 同表头）
+
+    R2 修复（一致性缺陷）：原实现无论请求何种 --format，合并文件永远写成
+    _combined.md，导致 --format json/jsonl/csv 的流水线里混入一个多余的
+    markdown 文件、且与用户指定的产物格式不一致。现严格按 fmt 输出对应格式。
+    （R1 新能力：json/jsonl/csv 三种合并产物让下游无需再解析 markdown。）
+    error/skipped 的结果不计入合并。无成功结果时跳过并提示，不写空文件。
     """
     out_dir = Path(output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    blocks = []
-    for r in results:
-        if r.get("status") != "ok" or not r.get("text"):
-            continue
-        src = Path(r["file"]).name
-        if fmt == "txt":
-            blocks.append(f"===== {src} =====\n{r['text']}")
-        else:
-            blocks.append(f"## {src}\n\n{r['text']}")
-    if not blocks:
+    ok_results = [r for r in results if r.get("status") == "ok" and r.get("text")]
+    if not ok_results:
         # R2 隐性问题：原本会写出一个只含换行的空 _combined 文件，
         # 误导用户「合并产物存在却有内容」。无成功结果时应跳过并提示。
         print("[提示] 没有可合并的成功结果，已跳过合并文件输出。")
         return None
-    ext = "txt" if fmt == "txt" else "md"
-    path = out_dir / f"_combined.{ext}"
-    path.write_text("\n\n".join(blocks) + "\n", encoding="utf-8")
+    if fmt == "json":
+        path = out_dir / "_combined.json"
+        path.write_text(json.dumps(ok_results, ensure_ascii=False, indent=2), encoding="utf-8")
+    elif fmt == "jsonl":
+        path = out_dir / "_combined.jsonl"
+        with open(path, "w", encoding="utf-8") as f:
+            for r in ok_results:
+                f.write(json.dumps(r, ensure_ascii=False) + "\n")
+    elif fmt == "csv":
+        path = out_dir / "_combined.csv"
+        with open(path, "w", encoding="utf-8-sig", newline="") as f:
+            writer = csv.DictWriter(
+                f, fieldnames=["file", "text", "chars", "elapsed", "status",
+                               "error", "avg_conf", "min_conf"]
+            )
+            writer.writeheader()
+            for r in ok_results:
+                writer.writerow(r)
+    elif fmt == "txt":
+        blocks = [f"===== {Path(r['file']).name} =====\n{r['text']}" for r in ok_results]
+        path = out_dir / "_combined.txt"
+        path.write_text("\n\n".join(blocks) + "\n", encoding="utf-8")
+    else:  # md
+        blocks = [f"## {Path(r['file']).name}\n\n{r['text']}" for r in ok_results]
+        path = out_dir / "_combined.md"
+        path.write_text("\n\n".join(blocks) + "\n", encoding="utf-8")
     print(f"[完成] 已写出合并文件：{path}")
     return path
 
