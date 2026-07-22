@@ -135,3 +135,10 @@ paddleocr-tool/
 - 自动跳过隐藏文件（如 `.DS_Store`）
 - Streamlit UI 增强：并行/置信度控件、结果指标卡（成功/总数）、逐文件预览与下载
 - 附 `run.sh` / `run.bat` 一键启动界面
+
+## 依赖与降级
+
+- **PaddlePaddle 体量警告**：完整 PaddleOCR 后端依赖 paddlepaddle（GB 级），首次安装耗时较长；按需选择。
+- **优雅降级**：未安装 PaddleOCR 时程序不崩溃，打印清晰安装指引并退出；可用 `--backend tesseract` 走轻量兜底，或 `--mock` 免任何 OCR 依赖跑通完整流程（含测试）。
+- 开发/测试依赖见 `requirements-dev.txt`，运行 `python -m pytest tests -q` 复现测试。
+
