@@ -565,3 +565,41 @@ def test_main_min_chars_reflected_in_results_json(tmp_path):
     summary = (out / "summary.txt").read_text(encoding="utf-8")
     assert "成功(ok)：0" in summary
 
+
+
+def test_main_fail_on_error_returns_nonzero(tmp_path, monkeypatch, capsys):
+    """R1 新需求验证：--fail-on-error 时，任一文件识别失败应返回退出码 1。"""
+    img = tmp_path / "a.png"
+    img.write_bytes(b"fake")
+    out = tmp_path / "out"
+
+    def boom_recognizer(*a, **k):
+        raise RuntimeError("模拟识别失败")
+
+    def fake_build(args):
+        return boom_recognizer, "mock"
+
+    monkeypatch.setattr(ocr_tool, "build_recognizer", fake_build)
+
+    # 不带 --fail-on-error：默认吞掉失败，退出 0
+    rc0 = ocr_tool.main(["--input", str(img), "--output", str(out), "--mock"])
+    assert rc0 == 0
+    # 带 --fail-on-error：升级为非零退出码
+    rc1 = ocr_tool.main([
+        "--input", str(img), "--output", str(out), "--mock", "--fail-on-error",
+    ])
+    assert rc1 == 1
+    err = capsys.readouterr().err
+    assert "退出码置为 1" in err
+
+
+def test_collect_files_missing_path_reports_stderr(tmp_path, capsys):
+    """R2 隐性问题验证：输入路径不存在时，错误应打印到 stderr 而非 stdout。"""
+    bad = tmp_path / "nope" / "x.png"
+    out = tmp_path / "out"
+    rc = ocr_tool.main(["--input", str(bad), "--output", str(out), "--mock"])
+    captured = capsys.readouterr()
+    assert "输入路径不存在" in captured.err
+    assert "输入路径不存在" not in captured.out
+    # 退出码仍为 0（保持原有行为：无文件可处理也算正常收尾）
+    assert rc == 0

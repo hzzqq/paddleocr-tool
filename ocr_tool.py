@@ -112,6 +112,8 @@ def parse_args(argv=None):
                         help="识别字符数低于该值的「成功」结果标记为 filtered（噪声过滤，不计入成功数/合并）")
     parser.add_argument("--max-files", type=int, default=0,
                         help="最多处理的文件数（0 表示不限制），便于对大目录做抽样 / 试跑")
+    parser.add_argument("--fail-on-error", action="store_true",
+                        help="R1 新能力：任一文件识别失败时返回非零退出码（默认仍返回 0），便于 CI / 流水线把「部分失败」升级为构建失败")
     return parser.parse_args(argv)
 
 
@@ -142,7 +144,10 @@ def collect_files(input_path, recursive, include=None):
         return files, skipped
 
     if not p.is_dir():
-        print(f"[错误] 输入路径不存在：{input_path}")
+        # R2 修复（隐性可观测性缺陷）：原实现把「路径不存在」这类错误打印到
+        # 标准输出，会被 `ocr ... > files.txt` 这类重定向捕获进产物，污染正常
+        # 输出且难以被流水线察觉。错误应走 stderr，与正常进度输出分离。
+        print(f"[错误] 输入路径不存在：{input_path}", file=sys.stderr)
         return files, skipped
 
     # 目录：按扩展名收集
@@ -732,7 +737,13 @@ def main(argv=None):
             print(f"[提示] {len(filtered)} 个结果因识别字符数低于 {args.min_chars} 被标记为 filtered（不计入成功）")
     write_outputs(results, args.output, args.format, combine=args.combine)
     ok = sum(1 for r in results if r["status"] == "ok")
+    errored = sum(1 for r in results if r["status"] == "error")
     print(f"[汇总] 成功 {ok}/{len(results)}，结果见：{args.output}")
+    # R1 新能力：--fail-on-error 把「部分文件识别失败」升级为非零退出码，
+    # 便于 CI / 流水线把静默的部分失败暴露为构建失败，而非默认吞掉（exit 0）。
+    if errored and args.fail_on_error:
+        print(f"[失败] 有 {errored} 个文件识别失败，因 --fail-on-error 退出码置为 1。", file=sys.stderr)
+        return 1
 
     # 低置信度清单：把质量存疑的结果单独列出，便于重识别/人工核对
     if args.low_conf_threshold >= 0:
