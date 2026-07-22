@@ -123,3 +123,27 @@ def test_write_outputs_csv_includes_chars_and_error(tmp_path):
     assert "chars" in csv_text.splitlines()[0]
     assert "error" in csv_text.splitlines()[0]
     assert "boom" in csv_text
+
+
+def test_collect_all_multiple_inputs(tmp_path):
+    """R1 新需求验证：--input 支持逗号/换行分隔多路径并去重。"""
+    (tmp_path / "a.png").write_bytes(b"x")
+    sub = tmp_path / "sub"
+    sub.mkdir()
+    (sub / "b.png").write_bytes(b"x")
+    spec = f"{tmp_path / 'a.png'},{tmp_path / 'sub'}"
+    files, _ = ocr_tool.collect_all(spec, recursive=False)
+    names = {f.name for f in files}
+    assert names == {"a.png", "b.png"}
+
+
+def test_recognize_paddle_rebuild_on_lang_change():
+    """隐性正确性 bug 验证：切换语言应重建识别器，同语言复用。"""
+    ocr_tool._paddle_recognizer = None
+    ocr_tool._paddle_recognizer_lang = None
+    before = _FakeOCR.instances
+    ocr_tool.recognize_paddle(_FakeOCR, "x.png", "ch")
+    ocr_tool.recognize_paddle(_FakeOCR, "y.png", "en")  # 换语言 -> 重建
+    assert _FakeOCR.instances - before == 2
+    ocr_tool.recognize_paddle(_FakeOCR, "z.png", "en")  # 同语言 -> 复用
+    assert _FakeOCR.instances - before == 2

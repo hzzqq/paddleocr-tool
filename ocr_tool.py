@@ -20,6 +20,7 @@ import argparse
 import csv
 import json
 import os
+import re
 import sys
 import threading
 import time
@@ -108,6 +109,31 @@ def collect_files(input_path, recursive):
     return files, []
 
 
+def collect_all(input_spec, recursive):
+    """支持 `--input` 传入多个路径（逗号 / 换行分隔），聚合去重。
+
+    单路径时等价于 collect_files；多路径用于一次性批量处理若干分散文件 / 目录。
+    """
+    files = []
+    skipped = []
+    for part in re.split(r"[,\n]", input_spec or ""):
+        part = part.strip()
+        if not part:
+            continue
+        f, s = collect_files(part, recursive)
+        files.extend(f)
+        skipped.extend(s)
+    # 去重并保持顺序
+    seen = set()
+    uniq = []
+    for fpath in files:
+        key = str(fpath)
+        if key not in seen:
+            seen.add(key)
+            uniq.append(fpath)
+    return uniq, skipped
+
+
 def load_paddle_backend():
     """懒加载 PaddleOCR 后端，缺失时抛出带安装提示的异常。"""
     try:
@@ -144,8 +170,10 @@ def pdf_to_images(pdf_path):
 
 # PaddleOCR 识别器懒加载单例：避免每张图都重建（原实现每图 new 一次，
 # 多图/并行时是明显性能悬崖），并用锁保证多线程下复用安全。
+# 单例按 lang 维度缓存：切换语言时自动重建，避免用错语言的识别器（隐性正确性 bug）。
 _paddle_lock = threading.Lock()
 _paddle_recognizer = None
+_paddle_recognizer_lang = None
 
 
 def recognize_paddle(recognizer_cls, image_input, lang, min_conf=0.0):
@@ -154,12 +182,14 @@ def recognize_paddle(recognizer_cls, image_input, lang, min_conf=0.0):
     recognizer_cls：PaddleOCR 类（由 build_recognizer 传入）。
     内部以「懒加载单例 + 锁」复用同一个识别器实例，既消除逐图重建的
     性能悬崖，又用锁保证 ThreadPoolExecutor 并行时不会并发踩同一实例。
+    当 lang 变化时会自动重建单例，否则复用（正确性 + 性能双重保证）。
     min_conf：最低置信度阈值（0~1），低于该值的识别行将被丢弃（仅 paddle 生效）。
     """
-    global _paddle_recognizer
+    global _paddle_recognizer, _paddle_recognizer_lang
     with _paddle_lock:
-        if _paddle_recognizer is None:
+        if _paddle_recognizer is None or _paddle_recognizer_lang != lang:
             _paddle_recognizer = recognizer_cls(use_angle_cls=True, lang=lang)
+            _paddle_recognizer_lang = lang
         ocr = _paddle_recognizer
 
     if hasattr(image_input, "save"):  # PIL.Image（来自 PDF 转图）
@@ -358,7 +388,7 @@ def main(argv=None):
     print(f"后端：{'mock' if args.mock else args.backend}　语言：{args.lang}　格式：{args.format}"
           f"　递归：{args.recursive}　并行：{args.workers}　最低置信度：{args.min_conf}")
 
-    files, _ = collect_files(args.input, args.recursive)
+    files, _ = collect_all(args.input, args.recursive)
     if not files:
         print("[提示] 未找到可处理的图片 / PDF 文件。")
         # 仍创建输出目录，避免下游报错
