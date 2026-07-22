@@ -342,6 +342,25 @@ def test_main_combine_and_workers_cap(tmp_path, capsys):
     assert "安全上限" in out_text  # workers 被钳制提示
 
 
+def test_list_formats_exits_and_lists(capsys):
+    """R1 新能力：--list-formats 列出支持的 --format 输出格式即退出（返回0）。"""
+    rc = ocr_tool.main(["--list-formats"])
+    assert rc == 0
+    out_text = capsys.readouterr().out
+    assert "支持的输出格式" in out_text
+    for fmt in ("md", "txt", "json", "jsonl", "csv"):
+        assert fmt in out_text
+
+
+def test_format_format_list_pure():
+    """format_format_list 纯函数：默认格式为 md 且覆盖全部 5 种格式。"""
+    text = ocr_tool.format_format_list()
+    assert ocr_tool.DEFAULT_FORMAT == "md"
+    for fmt in ("md", "txt", "json", "jsonl", "csv"):
+        assert fmt in text
+        assert ocr_tool.FORMAT_INFO[fmt]
+
+
 def test_main_skip_existing(tmp_path, capsys):
     """R1 新需求验证：--skip-existing 跳过已有结果文件，实现断点续跑。"""
     img = tmp_path / "a.png"

@@ -84,6 +84,8 @@ def parse_args(argv=None):
                         help=f"识别语言，默认 {DEFAULT_LANG}（中文）。运行 --lang-list 查看全部支持代码")
     parser.add_argument("--lang-list", action="store_true",
                         help="列出所有官方支持的识别语言代码（含两套后端映射）并退出")
+    parser.add_argument("--list-formats", action="store_true",
+                        help="列出所有支持的 --format 输出格式及其说明并退出")
     parser.add_argument("--format", choices=["md", "json", "csv", "txt", "jsonl"],
                         default="md", help="输出格式，默认 md（txt 为逐文件纯文本，jsonl 为每行一条 JSON）")
     parser.add_argument("--recursive", action="store_true",
@@ -375,6 +377,27 @@ def format_lang_list() -> str:
     for code, info in SUPPORTED_LANGS.items():
         lines.append(f"{code:<6}{info['name']:<10}{info['paddle']:<12}{info['tesseract']}")
     lines.append(f"\n默认语言：{DEFAULT_LANG}（{SUPPORTED_LANGS[DEFAULT_LANG]['name']}）")
+    return "\n".join(lines)
+
+
+# 各输出格式的能力说明（供 --list-formats 展示与单测）
+FORMAT_INFO = {
+    "md": "逐文件 Markdown + 合并 _combined.md（人名/标题小标题，适合人读）",
+    "txt": "逐文件纯文本 .txt + 合并 _combined.txt",
+    "json": "整批 results.json + 合并 _combined.json（机器可读数组）",
+    "jsonl": "results.jsonl 每行一条 JSON（便于 grep/awk/jq 与流式消费）",
+    "csv": "results.csv 表头化 + 合并 _combined.csv（Excel/表格友好）",
+}
+DEFAULT_FORMAT = "md"
+
+
+def format_format_list() -> str:
+    """返回 --list-formats 的可读表格文本（纯函数，便于单测）。"""
+    lines = ["支持的输出格式（--format 取值）：",
+             f"{'格式':<8}{'说明'}"]
+    for fmt, desc in FORMAT_INFO.items():
+        lines.append(f"{fmt:<8}{desc}")
+    lines.append(f"\n默认格式：{DEFAULT_FORMAT}（{FORMAT_INFO[DEFAULT_FORMAT]}）")
     return "\n".join(lines)
 
 
@@ -732,6 +755,10 @@ def main(argv=None):
     # R1 新能力：--lang-list 仅列出支持的语言即退出，不要求 --input/--output
     if args.lang_list:
         print(format_lang_list())
+        return 0
+    # R1 新能力：--list-formats 仅列出支持的 --format 输出格式即退出
+    if args.list_formats:
+        print(format_format_list())
         return 0
     # 缺少必要参数时给出明确错误（--input/--output 在 --lang-list 外为必填）
     if not args.input or not args.output:
