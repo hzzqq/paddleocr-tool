@@ -80,6 +80,8 @@ def parse_args(argv=None):
                         help="额外输出一个合并文件（_combined.md / .txt），把所有成功结果按序拼接，便于下游一次性消费")
     parser.add_argument("--skip-existing", action="store_true",
                         help="跳过已有输出结果的文件（按格式判断），便于断点续跑 / 增量重试，避免重复 OCR")
+    parser.add_argument("--low-conf-threshold", type=float, default=-1.0,
+                        help="平均置信度低于该值的文件写入 low_confidence.txt 清单（默认 -1 表示不生成；仅 paddle 后端有效）")
     return parser.parse_args(argv)
 
 
@@ -473,6 +475,18 @@ def _output_exists(output_dir, file_path, fmt):
     return (out / "results.json").exists()
 
 
+def collect_low_conf(results, threshold: float) -> list:
+    """收集平均置信度低于阈值的结果（仅对有置信度信息的文件生效）。
+
+    供「低质量结果清单」导出：用户可据此快速定位需要重识别/人工核对的文件。
+    无置信度信息（avg_conf 为 None，如 mock/tesseract 后端）不参与。
+    """
+    return [
+        r for r in results
+        if isinstance(r.get("avg_conf"), (int, float)) and r["avg_conf"] < threshold
+    ]
+
+
 def main(argv=None):
     args = parse_args(argv)
     # 安全护栏：限制并行线程数，避免 --workers 过大耗尽系统资源
@@ -546,6 +560,17 @@ def main(argv=None):
     write_outputs(results, args.output, args.format, combine=args.combine)
     ok = sum(1 for r in results if r["status"] == "ok")
     print(f"[汇总] 成功 {ok}/{len(results)}，结果见：{args.output}")
+
+    # 低置信度清单：把质量存疑的结果单独列出，便于重识别/人工核对
+    if args.low_conf_threshold >= 0:
+        low = collect_low_conf(results, args.low_conf_threshold)
+        if low:
+            low_path = Path(args.output) / "low_confidence.txt"
+            lines = [f"低置信度结果（avg_conf < {args.low_conf_threshold}）共 {len(low)} 个：", ""]
+            for r in low:
+                lines.append(f"  {r['file']}  avg_conf={r['avg_conf']}")
+            low_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+            print(f"[完成] 已写出低置信度清单：{low_path}")
     return 0
 
 
