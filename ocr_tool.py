@@ -122,8 +122,8 @@ def parse_args(argv=None):
                         help="识别字符数低于该值的「成功」结果标记为 filtered（噪声过滤，不计入成功数/合并）")
     parser.add_argument("--max-files", type=int, default=0,
                         help="最多处理的文件数（0 表示不限制），便于对大目录做抽样 / 试跑")
-    parser.add_argument("--sort", choices=["name", "size"], default="name",
-                        help="处理顺序：name=按文件名字典序（默认，确定性）；size=按体积降序（大文件优先，利于并行吞吐）")
+    parser.add_argument("--sort", choices=["name", "size", "mtime"], default="name",
+                        help="处理顺序：name=按文件名字典序（默认，确定性）；size=按体积降序（大文件优先，利于并行吞吐）；mtime=按修改时间降序（最新改动优先）")
     parser.add_argument("--fail-on-error", action="store_true",
                         help="R1 新能力：任一文件识别失败时返回非零退出码（默认仍返回 0），便于 CI / 流水线把「部分失败」升级为构建失败")
     parser.add_argument("--retries", type=int, default=0,
@@ -248,6 +248,10 @@ def sort_files(files, mode: str = "name"):
         return []
     if mode == "size":
         return sorted(files, key=lambda p: _safe_size(p), reverse=True)
+    if mode == "mtime":
+        # R1 新能力：按文件修改时间降序（最新改动优先），适合「先处理
+        # 刚扫描/刚下载的图片」这类场景（与 size 的「大文件优先」互补）。
+        return sorted(files, key=lambda p: _safe_mtime(p), reverse=True)
     # 默认按名称（确定性）
     return sorted(files, key=lambda p: str(p))
 
@@ -257,6 +261,13 @@ def _safe_size(p) -> int:
         return p.stat().st_size
     except OSError:
         return 0
+
+
+def _safe_mtime(p) -> float:
+    try:
+        return p.stat().st_mtime
+    except OSError:
+        return 0.0
 
 
 def collect_all(input_spec, recursive, include=None, exts=None, max_depth=None, max_size=None):
@@ -1053,6 +1064,13 @@ def main(argv=None):
             print("✅ 全部文件已有识别结果，无需重复处理。")
             return 0
 
+    # R2 修复（隐性采样缺陷）：--max-files 截断必须发生在 --sort 之后，
+    # 否则「size/mtime 排序优先处理」的抽样意图被破——先按名称顺序截断 N 个、
+    # 再对这 N 个排序，导致「大文件优先 / 最新优先」形同虚设。现先排序、再截断。
+    # R1 新能力：按 --sort 指定的顺序处理（默认 name 保证确定性；
+    # size=大文件优先利于并行吞吐；mtime=最新改动优先）。
+    files = sort_files(files, args.sort)
+
     # 抽样 / 试跑：限制处理文件数（默认 0 不限制）。超出部分计入 skipped 保持透明。
     if args.max_files and args.max_files > 0 and len(files) > args.max_files:
         extra = files[args.max_files:]
@@ -1060,9 +1078,6 @@ def main(argv=None):
         skipped.extend(extra)
         print(f"[提示] --max-files {args.max_files}：仅处理前 {args.max_files} 个文件，"
               f"其余 {len(extra)} 个计入跳过。")
-
-    # R1 新能力：按 --sort 指定的顺序处理（默认 name 保证确定性；size 大文件优先）
-    files = sort_files(files, args.sort)
 
     if args.dry_run:
         # 预检模式：只统计待处理文件，不执行 OCR（新能力 + 可观测性）

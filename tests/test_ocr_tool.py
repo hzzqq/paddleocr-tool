@@ -1113,3 +1113,41 @@ def test_write_combined_respects_status_filter(tmp_path):
     content = Path(path).read_text(encoding="utf-8")
     assert "空白内容" in content
     assert "成功文本" not in content
+
+
+def test_sort_files_mtime_newest_first(tmp_path):
+    """R1 验证：--sort mtime 按修改时间降序（最新优先）。"""
+    import os
+    old = tmp_path / "old.png"
+    new = tmp_path / "new.png"
+    old.write_bytes(b"\x89PNG")
+    new.write_bytes(b"\x89PNG")
+    # 让 old 明显更早
+    os.utime(old, (1000.0, 1000.0))
+    os.utime(new, (2000.0, 2000.0))
+    out = ocr_tool.sort_files([old, new], "mtime")
+    assert out[0] == new  # 最新改动在前
+    assert out[1] == old
+
+
+def test_sort_then_max_files_picks_largest():
+    """R2 验证：--sort size 后接 --max-files 截断应得到「体积最大」的 N 个
+    （此前 main 先按名称截断再排序，导致 size 优先采样形同虚设）。"""
+    class _F:
+        def __init__(self, name, size):
+            self.name = name
+            self._size = size
+        def __fspath__(self):
+            return self.name
+        def stat(self):
+            class _S:
+                st_size = self._size
+                st_mtime = 0.0
+            return _S()
+    small = _F("a.png", 10)
+    big = _F("b.png", 1000)
+    mid = _F("c.png", 100)
+    # 模拟 main 的「先排序、再截断」
+    sorted_files = ocr_tool.sort_files([small, big, mid], "size")
+    top2 = sorted_files[:2]
+    assert top2 == [big, mid]  # 体积最大的两个，而非按名称截取的 [small, big]
