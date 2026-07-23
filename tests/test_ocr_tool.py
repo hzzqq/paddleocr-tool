@@ -1151,3 +1151,77 @@ def test_sort_then_max_files_picks_largest():
     sorted_files = ocr_tool.sort_files([small, big, mid], "size")
     top2 = sorted_files[:2]
     assert top2 == [big, mid]  # 体积最大的两个，而非按名称截取的 [small, big]
+
+
+def test_collect_files_exclude(tmp_path):
+    """R1 验证：--exclude 命中排除模式的文件被跳过。"""
+    (tmp_path / "cover.png").write_bytes(b"x")
+    (tmp_path / "page1.png").write_bytes(b"x")
+    (tmp_path / "page2.png").write_bytes(b"x")
+    files, skipped = ocr_tool.collect_files(str(tmp_path), recursive=False, exclude="cover")
+    assert {f.name for f in files} == {"page1.png", "page2.png"}
+    assert any(s.name == "cover.png" for s in skipped)
+
+
+def test_collect_files_multi_exclude_comma(tmp_path):
+    """R1 验证：--exclude 支持逗号分隔的多个模式（OR 语义）。"""
+    (tmp_path / "cover.png").write_bytes(b"x")
+    (tmp_path / "draft.png").write_bytes(b"x")
+    (tmp_path / "page1.png").write_bytes(b"x")
+    files, _ = ocr_tool.collect_files(str(tmp_path), recursive=False, exclude="cover,draft")
+    assert {f.name for f in files} == {"page1.png"}
+
+
+def test_collect_files_include_then_exclude(tmp_path):
+    """R1 验证：--include 先收窄、--exclude 再剔除指定文件。"""
+    (tmp_path / "cover_a.png").write_bytes(b"x")
+    (tmp_path / "cover_b.png").write_bytes(b"x")
+    (tmp_path / "page1.png").write_bytes(b"x")
+    files, _ = ocr_tool.collect_files(
+        str(tmp_path), recursive=False, include="cover*", exclude="*_b*"
+    )
+    assert {f.name for f in files} == {"cover_a.png"}
+
+
+def test_main_low_conf_threshold_zero_no_spurious_warning(tmp_path, capsys):
+    """R2 验证：--low-conf-threshold 0 视为关闭，mock 后端下不应打印
+    「置信度选项不生效」的虚假告警（此前用 `>= 0` 会在阈值=0 时误报）。"""
+    out = tmp_path / "out"
+    out.mkdir()
+    (tmp_path / "a.png").write_bytes(b"\x89PNG")
+    rc = ocr_tool.main([
+        "--input", str(tmp_path), "--output", str(out),
+        "--mock", "--low-conf-threshold", "0",
+    ])
+    assert rc == 0
+    captured = capsys.readouterr()
+    assert "置信度相关选项" not in captured.out
+    assert "置信度相关选项" not in captured.err
+
+
+def test_main_low_conf_threshold_positive_warns_on_mock(tmp_path, capsys):
+    """R2 回归：--low-conf-threshold 0.5（真正启用）在 mock 后端下仍应提示
+    置信度选项仅 paddle 生效（确保 `> 0` 修复不会误吞真实告警）。"""
+    out = tmp_path / "out"
+    out.mkdir()
+    (tmp_path / "a.png").write_bytes(b"\x89PNG")
+    rc = ocr_tool.main([
+        "--input", str(tmp_path), "--output", str(out),
+        "--mock", "--low-conf-threshold", "0.5",
+    ])
+    assert rc == 0
+    captured = capsys.readouterr()
+    assert "置信度相关选项" in (captured.out + captured.err)
+
+
+def test_main_low_conf_threshold_zero_no_report_written(tmp_path):
+    """R2 验证：阈值=0 时不写 low_confidence.txt（视为关闭）。"""
+    out = tmp_path / "out"
+    out.mkdir()
+    (tmp_path / "a.png").write_bytes(b"\x89PNG")
+    rc = ocr_tool.main([
+        "--input", str(tmp_path), "--output", str(out),
+        "--mock", "--low-conf-threshold", "0",
+    ])
+    assert rc == 0
+    assert not (out / "low_confidence.txt").exists()

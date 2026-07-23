@@ -116,6 +116,9 @@ def parse_args(argv=None):
                         help="静默模式：不打印逐文件进度，仅输出关键结果与错误（适合脚本/流水线）")
     parser.add_argument("--include", default=None,
                         help="文件名过滤：只处理文件名匹配该子串或 glob 模式（如 '*page*' 或 '封面'）的文件")
+    parser.add_argument("--exclude", default=None,
+                        help="R1 新能力：文件名排除模式（逗号/换行分隔的多个子串或 glob），命中任一即跳过；"
+                             "与 --include 互补：先 --include 收窄、再 --exclude 剔除指定文件")
     parser.add_argument("--ext", default=None,
                         help="扩展名过滤：只处理指定扩展名（逗号分隔，如 .png,.pdf），覆盖默认图片/PDF 白名单")
     parser.add_argument("--min-chars", type=int, default=0,
@@ -163,11 +166,11 @@ def _name_matches(name: str, include) -> bool:
     return include in name or fnmatch.fnmatch(name, include)
 
 
-def collect_files(input_path, recursive, include=None, exts=None, max_depth=None, max_size=None):
+def collect_files(input_path, recursive, include=None, exts=None, max_depth=None, max_size=None, exclude=None):
     """收集需要处理的文件列表（图片 + PDF）。
 
     返回 (文件列表, 跳过列表)。跳过列表包含不支持类型 / 隐藏文件 / 隐藏目录 /
-    未命中 --include / 未命中 --ext / 超过 --max-size，便于调用方透明提示。
+    未命中 --include / 命中 --exclude / 未命中 --ext / 超过 --max-size，便于调用方透明提示。
 
     exts：可选扩展名白名单（小写，含点），提供时覆盖默认 IMAGE/PDF 白名单，
     仅处理落在该集合内的文件（R1 新能力，与 --include 的「文件名/子串」维度互补）。
@@ -175,6 +178,8 @@ def collect_files(input_path, recursive, include=None, exts=None, max_depth=None
     目录的目录层级，1 表示只取顶层。None / <=0 表示不限（R1 新能力）。
     max_size：可选体积上限（字节，>0 生效）；超过该大小的文件被跳过，避免
     超大扫描件 / 图片把内存 / 后端拖垮（R1 新能力 + R2 隐性健壮性护栏）。
+    exclude：可选排除模式列表（R1 新能力），文件名命中任一即跳过，与 --include
+    互补——先 --include 收窄、再 --exclude 剔除指定文件（如临时件/封面/水印）。
     """
     p = Path(input_path)
     files = []
@@ -183,9 +188,13 @@ def collect_files(input_path, recursive, include=None, exts=None, max_depth=None
         exts = {e.strip().lower() for e in exts.split(",") if e.strip()}
     allowed_exts = exts if exts is not None else (IMAGE_EXTS | PDF_EXTS)
     include_list = _split_include(include)  # R1：支持多模式 OR
+    exclude_list = _split_include(exclude)  # R1：支持多模式 OR
     if p.is_file():
         ext = p.suffix.lower()
         if ext in allowed_exts and _name_matches(p.name, include_list):
+            if exclude_list and _name_matches(p.name, exclude_list):  # R1：命中 --exclude 跳过
+                skipped.append(p)
+                return files, skipped
             if max_size and max_size > 0 and _safe_size(p) > max_size:
                 skipped.append(p)  # 超过体积上限
             else:
@@ -219,6 +228,9 @@ def collect_files(input_path, recursive, include=None, exts=None, max_depth=None
         ext = f.suffix.lower()
         if ext in allowed_exts:
             if _name_matches(f.name, include_list):
+                if exclude_list and _name_matches(f.name, exclude_list):  # R1：命中 --exclude 跳过
+                    skipped.append(f)
+                    continue
                 if max_size and max_size > 0 and _safe_size(f) > max_size:
                     skipped.append(f)  # 超过体积上限
                     continue
@@ -270,11 +282,11 @@ def _safe_mtime(p) -> float:
         return 0.0
 
 
-def collect_all(input_spec, recursive, include=None, exts=None, max_depth=None, max_size=None):
+def collect_all(input_spec, recursive, include=None, exts=None, max_depth=None, max_size=None, exclude=None):
     """支持 `--input` 传入多个路径（逗号 / 换行分隔），聚合去重。
 
     单路径时等价于 collect_files；多路径用于一次性批量处理若干分散文件 / 目录。
-    max_depth / max_size 透传给 collect_files（递归深度上限 / 体积上限）。
+    max_depth / max_size / exclude 透传给 collect_files（递归深度上限 / 体积上限 / 排除模式）。
 
     R1 新能力：各路径片段支持 glob 模式（如 `dir/*.png`、`imgs/**/*.jpg`），
     自动展开为匹配文件逐个处理，省去用户先 `ls` 再粘贴文件列表。
@@ -295,7 +307,7 @@ def collect_all(input_spec, recursive, include=None, exts=None, max_depth=None, 
                 for m in matched:
                     f, s = collect_files(
                         m, recursive, include=include, exts=exts,
-                        max_depth=max_depth, max_size=max_size,
+                        max_depth=max_depth, max_size=max_size, exclude=exclude,
                     )
                     files.extend(f)
                     skipped.extend(s)
@@ -306,7 +318,7 @@ def collect_all(input_spec, recursive, include=None, exts=None, max_depth=None, 
                 continue
         f, s = collect_files(
             part, recursive, include=include, exts=exts,
-            max_depth=max_depth, max_size=max_size,
+            max_depth=max_depth, max_size=max_size, exclude=exclude,
         )
         files.extend(f)
         skipped.extend(s)
@@ -1033,7 +1045,7 @@ def main(argv=None):
 
     files, skipped = collect_all(
         args.input, args.recursive, include=args.include, exts=args.ext,
-        max_depth=args.max_depth, max_size=args.max_size,
+        max_depth=args.max_depth, max_size=args.max_size, exclude=args.exclude,
     )
     if not files:
         # 隐性可观测性：原实现把 collect_all 返回的 skipped 直接丢弃，
@@ -1098,7 +1110,7 @@ def main(argv=None):
 
     # 隐性问题：--min-conf / --low-conf-threshold 仅 paddle 后端生效，
     # 但 tesseract / mock 后端会静默忽略，用户误以为已过滤。这里给出明确提示。
-    if (args.min_conf > 0 or args.low_conf_threshold >= 0) and backend_name != "paddle":
+    if (args.min_conf > 0 or args.low_conf_threshold > 0) and backend_name != "paddle":
         print(f"[提示] 置信度相关选项（--min-conf / --low-conf-threshold）仅 paddle 后端生效，"
               f"当前后端为 {backend_name}，这些选项不会生效。")
 
@@ -1156,7 +1168,11 @@ def main(argv=None):
         return 1
 
     # 低置信度清单：把质量存疑的结果单独列出，便于重识别/人工核对
-    if args.low_conf_threshold >= 0:
+    # R2 一致性修复：low_conf_threshold <= 0 视为「关闭」（与 -1.0 默认语义一致，
+    # 且 avg_conf 恒 >= 0，阈值 0 永远收集不到任何文件）；此前用 `>= 0` 会在
+    # 阈值=0 时仍无意义进入收集分支，并在非 paddle 后端触发虚假的「置信度选项
+    # 不生效」告警。现统一用 `> 0` 判定启用。
+    if args.low_conf_threshold > 0:
         low = collect_low_conf(results, args.low_conf_threshold)
         if low:
             low_path = Path(args.output) / "low_confidence.txt"
