@@ -973,6 +973,49 @@ def test_list_formats_returns_0_without_io_args(capsys):
     assert "支持的" in capsys.readouterr().out
 
 
+def test_format_version_contains_tool_version():
+    """R1 新能力：format_version 返回含版本号的字符串。"""
+    text = ocr_tool.format_version()
+    assert ocr_tool.TOOL_VERSION in text
+    assert "paddleocr-tool" in text
+
+
+def test_main_version_returns_zero_without_io_args(capsys):
+    """R1 新能力：--version 仅打印版本号并退出，无需 --input/--output。"""
+    rc = ocr_tool.main(["--version"])
+    assert rc == 0
+    out_text = capsys.readouterr().out
+    assert ocr_tool.TOOL_VERSION in out_text
+
+
+def test_main_version_does_not_require_input():
+    """--version 不应被「缺少 --input」拦截（与 --list-* 信息标志一致）。"""
+    # 通过不抛异常 + 返回 0 验证（不依赖 capsys，避免与其它用例耦合）
+    import io
+    import contextlib
+
+    buf = io.StringIO()
+    with contextlib.redirect_stdout(buf):
+        rc = ocr_tool.main(["--version"])
+    assert rc == 0
+    assert ocr_tool.TOOL_VERSION in buf.getvalue()
+
+
+def test_collect_all_glob_honors_recursive_flag(tmp_path):
+    """R2 修复验证：glob 展开应尊重 --recursive（此前硬编码 recursive=True，
+    导致 '**' 模式即便未传 --recursive 也会下钻两级子目录）。"""
+    (tmp_path / "a.png").write_bytes(b"x")
+    sub = tmp_path / "sub" / "deep"
+    sub.mkdir(parents=True)
+    (sub / "c.png").write_bytes(b"x")
+    # 未递归：'**/*.png' 只匹配一级，拿不到两级深的 c.png，也不应拿到根 a.png
+    files_off, _ = ocr_tool.collect_all(str(tmp_path / "**/*.png"), recursive=False)
+    assert files_off == []
+    # 递归：应能找到根 a.png 与两级深 c.png
+    files_on, _ = ocr_tool.collect_all(str(tmp_path / "**/*.png"), recursive=True)
+    assert {f.name for f in files_on} == {"a.png", "c.png"}
+
+
 def test_max_depth_limits_recursion(tmp_path):
     """R1：--max-depth 限制递归深度，1 只取顶层、不进子目录。"""
     (tmp_path / "top.png").write_bytes(b"x")

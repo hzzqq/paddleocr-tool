@@ -35,6 +35,9 @@ PDF_EXTS = {".pdf"}
 # 并行线程数安全上限（防止 --workers 过大耗尽系统资源）
 MAX_WORKERS = 16
 
+# 工具版本号（R1 新能力：--version 输出，便于脚本化识别与流水线断言）
+TOOL_VERSION = "1.2.0"
+
 # 官方支持的语言代码表（覆盖 PaddleOCR 与 tesseract 两套后端的映射）。
 # R1 新能力：--lang-list 列出本表；R2 修复：此前 --lang 为任意字符串，
 # 拼写错误（如 chh）会原样透传给后端、报错信息晦涩或静默用错语言，
@@ -88,6 +91,8 @@ def parse_args(argv=None):
                         help="列出所有支持的 --format 输出格式及其说明并退出")
     parser.add_argument("--list-backends", action="store_true",
                         help="列出本机已安装的 OCR 后端依赖（paddle/tesseract/pdf2image）并退出")
+    parser.add_argument("--version", action="store_true",
+                        help="打印工具版本号并退出（便于脚本化识别）")
     parser.add_argument("--format", choices=["md", "json", "csv", "txt", "jsonl"],
                         default="md", help="输出格式，默认 md（txt 为逐文件纯文本，jsonl 为每行一条 JSON）")
     parser.add_argument("--recursive", action="store_true",
@@ -302,7 +307,11 @@ def collect_all(input_spec, recursive, include=None, exts=None, max_depth=None, 
         # R1：glob 模式展开（含 * ? [ ]）。此前这类输入会被当字面路径，
         # 命中「路径不存在」分支静默失败（R2 隐性可用性缺陷）。
         if any(ch in part for ch in "*?["):
-            matched = _glob.glob(part, recursive=True)
+            # R2 修复（隐性一致性缺陷）：原实现硬编码 recursive=True，
+            # 导致 '**' 这类递归通配即便用户未传 --recursive 也会下钻子目录，
+            # 与 --recursive 开关语义矛盾。现透传 collect_all 收到的 recursive
+            # 参数，使 glob 展开与目录遍历的递归行为保持一致。
+            matched = _glob.glob(part, recursive=recursive)
             if matched:
                 for m in matched:
                     f, s = collect_files(
@@ -539,6 +548,11 @@ def format_backends_list() -> str:
         f"  pdf2image : {'已安装' if avail['pdf2image'] else '未安装（pip install pdf2image + poppler）'}"
     )
     return "\n".join(lines)
+
+
+def format_version() -> str:
+    """返回工具版本的可读文本（R1 新能力：--version 的纯函数，便于单测）。"""
+    return f"paddleocr-tool {TOOL_VERSION}"
 
 
 def build_recognizer(args):
@@ -1003,6 +1017,10 @@ def main(argv=None):
     # 否则 `ocr --list-backends` 会先被「缺少 --input/--output」拦截而误报）。
     if args.list_backends:
         print(format_backends_list())
+        return 0
+    # R1 新能力：--version 仅打印工具版本号即退出，不要求 --input/--output
+    if args.version:
+        print(format_version())
         return 0
     # 缺少必要参数时给出明确错误。
     # R2 修复（隐性 UX 缺陷）：--dry-run 仅做预检、不需要 --output，但原实现
