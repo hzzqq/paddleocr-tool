@@ -131,6 +131,8 @@ def parse_args(argv=None):
                         help="扩展名过滤：只处理指定扩展名（逗号分隔，如 .png,.pdf），覆盖默认图片/PDF 白名单")
     parser.add_argument("--min-chars", type=int, default=0,
                         help="识别字符数低于该值的「成功」结果标记为 filtered（噪声过滤，不计入成功数/合并）")
+    parser.add_argument("--normalize", action="store_true",
+                        help="R1 新能力：规整识别文本——折叠行内连续空白、删除空行、去首尾空白，输出更利于下游消费")
     parser.add_argument("--max-files", type=int, default=0,
                         help="最多处理的文件数（0 表示不限制），便于对大目录做抽样 / 试跑")
     parser.add_argument("--sort", choices=["name", "size", "mtime"], default="name",
@@ -638,11 +640,12 @@ def _recognize_with_retry(recognizer, image_input, retries: int):
     raise last_exc
 
 
-def process_file(file_path, recognizer, backend_name, retries: int = 0):
+def process_file(file_path, recognizer, backend_name, retries: int = 0, normalize: bool = False):
     """处理单个文件，返回结果字典。
 
     对 PDF 会先转图再逐页识别，合并文本。
     retries：单页/单图识别失败时的最大重试次数（R1 新能力，默认 0 不重试）。
+    normalize：是否对识别文本做空白规整（R1 新能力，--normalize）。
     """
     ext = file_path.suffix.lower()
     start = time.time()
@@ -668,6 +671,8 @@ def process_file(file_path, recognizer, backend_name, retries: int = 0):
                 # R1 韧性：单页识别失败按 --retries 重试，避免偶发异常中断
                 try:
                     ptext, pconf = _recognize_with_retry(recognizer, img, retries)
+                    if normalize:
+                        ptext = normalize_text(ptext or "")
                     pages.append(f"--- 第 {idx} 页 ---\n" + (ptext or ""))
                     if pconf:
                         file_confs.extend(pconf)
@@ -685,6 +690,8 @@ def process_file(file_path, recognizer, backend_name, retries: int = 0):
                 status = "ok"
         else:
             text, fconf = _recognize_with_retry(recognizer, file_path, retries)
+            if normalize:
+                text = normalize_text(text or "")
             if fconf:
                 file_confs.extend(fconf)
             status = "ok"
@@ -702,7 +709,10 @@ def process_file(file_path, recognizer, backend_name, retries: int = 0):
     # R2 修复（隐性可观测性缺陷）：原本空文本（识别不到任何字，但无异常）
     # 也会标记为 ok 并计入「成功」，污染 ok 计数与合并文件。现显式标记为
     # "empty"，既不计入成功也不进入合并，便于发现「识别失败但没报错」的情况。
-    if not text and status == "ok":
+    # R2 修复（隐性噪声）：仅含空白的文本（如 "   \n  "）此前因字符串非空，
+    # 被误判为 ok 并计入成功数（chars>0），污染统计；现按「去除首尾空白后为空」
+    # 判定 empty，与真实空结果一致处理。
+    if not text.strip() and status == "ok":
         status = "empty"
     elapsed = round(time.time() - start, 3)
     avg_conf = round(sum(file_confs) / len(file_confs), 3) if file_confs else None
@@ -737,6 +747,23 @@ def _unique_path(output_dir, name: str):
         if not cand.exists():
             return cand
         i += 1
+
+
+def normalize_text(text: str) -> str:
+    """规整识别文本：折叠行内连续空白、删除空行、去首尾空白。
+
+    R1 新能力：OCR / 识别输出常含多余空格、Tab 与空行，折叠后更利于下游
+    消费与阅读（如喂给 LLM、入库、比对），也避免「空行噪声」污染结果。
+    不改变文字内容，仅清理空白排版。
+    """
+    if not text:
+        return ""
+    out = []
+    for line in text.splitlines():
+        s = " ".join(line.split())  # 折叠行内连续空白 + 去首尾空白
+        if s:
+            out.append(s)
+    return "\n".join(out)
 
 
 def write_markdown(result, output_dir):
@@ -1188,7 +1215,7 @@ def main(argv=None):
         from concurrent.futures import ThreadPoolExecutor
 
         with ThreadPoolExecutor(max_workers=args.workers) as ex:
-            futures = [ex.submit(process_file, f, recognizer, backend_name, args.retries) for f in files]
+            futures = [ex.submit(process_file, f, recognizer, backend_name, args.retries, args.normalize) for f in files]
             for i, fut in enumerate(futures, 1):
                 res = fut.result()
                 if not args.quiet:
@@ -1198,7 +1225,7 @@ def main(argv=None):
         for i, f in enumerate(files, 1):
             if not args.quiet:
                 print(f"[进度] 处理第 {i}/{len(files)} 个：{f}")
-            res = process_file(f, recognizer, backend_name, args.retries)
+            res = process_file(f, recognizer, backend_name, args.retries, args.normalize)
             results.append(res)
 
     # R2 修复（隐性一致性 bug）：原实现先 write_outputs 再 apply_min_chars，

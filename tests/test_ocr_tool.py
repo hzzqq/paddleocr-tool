@@ -408,6 +408,38 @@ def test_process_file_empty_marked_not_ok(tmp_path):
     assert res["chars"] == 0
 
 
+def test_normalize_text_pure():
+    """R1 验证：normalize_text 折叠空白、删除空行、去首尾空白。"""
+    assert ocr_tool.normalize_text("  hello   world  \n") == "hello world"
+    assert ocr_tool.normalize_text("a\n\n\n\nb\n\n") == "a\nb"
+    assert ocr_tool.normalize_text("\t x \t y \t") == "x y"
+    assert ocr_tool.normalize_text("") == ""
+
+
+def test_process_file_normalize_flag(tmp_path):
+    """R1 验证：--normalize（process_file normalize=True）规整识别文本。"""
+    from pathlib import Path as _P
+
+    f = _P(tmp_path / "messy.png")
+    f.write_bytes(b"fake")
+    messy = "  第  一行   \n\n\n   第二行   \n"
+    res = ocr_tool.process_file(f, lambda p: (messy, None), "fake", normalize=True)
+    assert res["status"] == "ok"
+    assert res["text"] == "第 一行\n第二行"
+
+
+def test_process_file_whitespace_only_marked_empty(tmp_path):
+    """R2 修复验证：仅含空白的文本应判为 empty（此前误记为 ok 污染成功数）。"""
+    from pathlib import Path as _P
+
+    f = _P(tmp_path / "ws.png")
+    f.write_bytes(b"fake")
+    res = ocr_tool.process_file(f, lambda p: ("   \n  \t ", None), "fake")
+    assert res["status"] == "empty"  # 此前因字符串非空被误判为 ok
+    res2 = ocr_tool.process_file(f, lambda p: ("   \n  \t ", None), "fake", normalize=True)
+    assert res2["status"] == "empty"
+
+
 def test_output_filename_collision_safe(tmp_path):
     """R1 新需求验证：不同目录的同名文件输出不再静默覆盖。"""
     out = tmp_path / "out"
