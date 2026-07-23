@@ -93,6 +93,9 @@ def parse_args(argv=None):
                         help="列出本机已安装的 OCR 后端依赖（paddle/tesseract/pdf2image）并退出")
     parser.add_argument("--version", action="store_true",
                         help="打印工具版本号并退出（便于脚本化识别）")
+    parser.add_argument("--json", action="store_true",
+                        help="R1 新能力：信息类命令（--version/--lang-list/--list-formats/"
+                             "--list-backends）输出机器可读的 JSON，便于脚本/流水线解析")
     parser.add_argument("--format", choices=["md", "json", "csv", "txt", "jsonl"],
                         default="md", help="输出格式，默认 md（txt 为逐文件纯文本，jsonl 为每行一条 JSON）")
     parser.add_argument("--recursive", action="store_true",
@@ -190,7 +193,18 @@ def collect_files(input_path, recursive, include=None, exts=None, max_depth=None
     files = []
     skipped = []
     if exts is not None:
-        exts = {e.strip().lower() for e in exts.split(",") if e.strip()}
+        # R2 修复（隐性可用性问题）：--ext 传入 "png"（无前导点）时，
+        # 此前会原样与文件后缀 ".png" 比较，永远不相等 -> 全部文件被静默跳过、
+        # 结果为空且无任何提示。现统一规整为带前导点的小写扩展名。
+        norm = set()
+        for e in exts.split(","):
+            e = e.strip().lower()
+            if not e:
+                continue
+            if not e.startswith("."):
+                e = "." + e
+            norm.add(e)
+        exts = norm
     allowed_exts = exts if exts is not None else (IMAGE_EXTS | PDF_EXTS)
     include_list = _split_include(include)  # R1：支持多模式 OR
     exclude_list = _split_include(exclude)  # R1：支持多模式 OR
@@ -553,6 +567,30 @@ def format_backends_list() -> str:
 def format_version() -> str:
     """返回工具版本的可读文本（R1 新能力：--version 的纯函数，便于单测）。"""
     return f"paddleocr-tool {TOOL_VERSION}"
+
+
+def version_info() -> dict:
+    """返回工具版本信息的结构化字典（R1 新能力：--version --json 的纯函数）。"""
+    import platform
+
+    return {
+        "version": TOOL_VERSION,
+        "python": platform.python_version(),
+        "backends": available_backends(),
+    }
+
+
+def lang_list_data() -> list:
+    """返回支持语言的结构化列表（R1 新能力：--lang-list --json 的纯函数）。"""
+    return [
+        {"code": c, "name": i["name"], "paddle": i["paddle"], "tesseract": i["tesseract"]}
+        for c, i in SUPPORTED_LANGS.items()
+    ]
+
+
+def format_list_data() -> dict:
+    """返回支持输出格式的结构化字典（R1 新能力：--list-formats --json 的纯函数）。"""
+    return dict(FORMAT_INFO)
 
 
 def build_recognizer(args):
@@ -1006,21 +1044,33 @@ def main(argv=None):
     args = parse_args(argv)
     # R1 新能力：--lang-list 仅列出支持的语言即退出，不要求 --input/--output
     if args.lang_list:
-        print(format_lang_list())
+        if args.json:
+            print(json.dumps(lang_list_data(), ensure_ascii=False, indent=2))
+        else:
+            print(format_lang_list())
         return 0
     # R1 新能力：--list-formats 仅列出支持的 --format 输出格式即退出
     if args.list_formats:
-        print(format_format_list())
+        if args.json:
+            print(json.dumps(format_list_data(), ensure_ascii=False, indent=2))
+        else:
+            print(format_format_list())
         return 0
     # R1 新能力：--list-backends 仅列出本机已安装的后端依赖即退出，
     # 不需 --input/--output（R2 修复：信息类标志不应要求这两个必填参数，
     # 否则 `ocr --list-backends` 会先被「缺少 --input/--output」拦截而误报）。
     if args.list_backends:
-        print(format_backends_list())
+        if args.json:
+            print(json.dumps(available_backends(), ensure_ascii=False, indent=2))
+        else:
+            print(format_backends_list())
         return 0
     # R1 新能力：--version 仅打印工具版本号即退出，不要求 --input/--output
     if args.version:
-        print(format_version())
+        if args.json:
+            print(json.dumps(version_info(), ensure_ascii=False, indent=2))
+        else:
+            print(format_version())
         return 0
     # 缺少必要参数时给出明确错误。
     # R2 修复（隐性 UX 缺陷）：--dry-run 仅做预检、不需要 --output，但原实现

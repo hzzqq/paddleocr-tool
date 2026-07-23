@@ -1016,6 +1016,57 @@ def test_collect_all_glob_honors_recursive_flag(tmp_path):
     assert {f.name for f in files_on} == {"a.png", "c.png"}
 
 
+def test_collect_files_ext_without_leading_dot(tmp_path):
+    """R2 修复验证：--ext 传 'png'（无前导点）应与 '.png' 等价，不应静默跳过全部。"""
+    (tmp_path / "a.png").write_bytes(b"\x89PNG")
+    (tmp_path / "b.jpg").write_bytes(b"\xff\xd8")
+    # 无前导点
+    files, _ = ocr_tool.collect_files(str(tmp_path), recursive=False, exts="png")
+    assert {f.name for f in files} == {"a.png"}
+    # 混用：'png, .JPG' 都应规整生效
+    files2, _ = ocr_tool.collect_files(str(tmp_path), recursive=False, exts="png, .JPG")
+    assert {f.name for f in files2} == {"a.png", "b.jpg"}
+
+
+def test_version_info_structure():
+    """R1 新能力：version_info 返回含 version 与 backends 三键的字典。"""
+    info = ocr_tool.version_info()
+    assert info["version"] == ocr_tool.TOOL_VERSION
+    assert set(info["backends"].keys()) == {"paddle", "tesseract", "pdf2image"}
+
+
+def test_lang_list_data_structure():
+    """R1 新能力：lang_list_data 返回结构化语言列表（含后端映射）。"""
+    data = ocr_tool.lang_list_data()
+    codes = {d["code"] for d in data}
+    assert "ch" in codes and "fr" in codes
+    fr = next(d for d in data if d["code"] == "fr")
+    assert fr["tesseract"] == "fra"  # 结构携带正确引擎代码
+
+
+def test_main_info_commands_emit_json(capsys):
+    """R1 新能力：--json 让信息类命令输出合法 JSON（便于脚本解析）。"""
+    import json as _json
+
+    for cmd in (["--version", "--json"], ["--lang-list", "--json"],
+                ["--list-formats", "--json"], ["--list-backends", "--json"]):
+        rc = ocr_tool.main(cmd)
+        assert rc == 0
+        out = capsys.readouterr().out
+        parsed = _json.loads(out)  # 必须可解析
+        assert parsed
+
+
+def test_main_version_json_contains_version(capsys):
+    """--version --json 的 JSON 应含 TOOL_VERSION。"""
+    import json as _json
+
+    rc = ocr_tool.main(["--version", "--json"])
+    assert rc == 0
+    parsed = _json.loads(capsys.readouterr().out)
+    assert parsed["version"] == ocr_tool.TOOL_VERSION
+
+
 def test_max_depth_limits_recursion(tmp_path):
     """R1：--max-depth 限制递归深度，1 只取顶层、不进子目录。"""
     (tmp_path / "top.png").write_bytes(b"x")
