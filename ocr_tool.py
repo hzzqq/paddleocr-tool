@@ -132,7 +132,9 @@ def parse_args(argv=None):
     parser.add_argument("--min-chars", type=int, default=0,
                         help="识别字符数低于该值的「成功」结果标记为 filtered（噪声过滤，不计入成功数/合并）")
     parser.add_argument("--normalize", action="store_true",
-                        help="R1 新能力：规整识别文本——折叠行内连续空白、删除空行、去首尾空白，输出更利于下游消费")
+                        help="R1 新能力：规整识别文本——折叠行内连续空白、删除空行、去首尾空白、剔除不可见零宽字符，输出更利于下游消费")
+    parser.add_argument("--dedup-lines", action="store_true",
+                        help="R1 新能力：删除连续重复行（页眉/水印噪声），仅折叠严格相邻的重复行，不误删正文正常重复")
     parser.add_argument("--max-files", type=int, default=0,
                         help="最多处理的文件数（0 表示不限制），便于对大目录做抽样 / 试跑")
     parser.add_argument("--sort", choices=["name", "size", "mtime"], default="name",
@@ -692,12 +694,13 @@ def _recognize_with_retry(recognizer, image_input, retries: int):
     raise last_exc
 
 
-def process_file(file_path, recognizer, backend_name, retries: int = 0, normalize: bool = False):
+def process_file(file_path, recognizer, backend_name, retries: int = 0, normalize: bool = False, dedup: bool = False):
     """处理单个文件，返回结果字典。
 
     对 PDF 会先转图再逐页识别，合并文本。
     retries：单页/单图识别失败时的最大重试次数（R1 新能力，默认 0 不重试）。
     normalize：是否对识别文本做空白规整（R1 新能力，--normalize）。
+    dedup：是否删除连续重复行（R1 新能力，--dedup-lines）。
     """
     ext = file_path.suffix.lower()
     start = time.time()
@@ -758,6 +761,10 @@ def process_file(file_path, recognizer, backend_name, retries: int = 0, normaliz
     # 避免单文件异常拖垮整个批处理流程。
     if text is None:
         text = ""
+    # R1 新能力：--dedup-lines 删除连续重复行（页眉 / 水印噪声），放在规整之后、
+    # 空文本判定之前，保证最终写出的 text 已是去重结果（逐文件/合并产物一致）。
+    if dedup:
+        text = dedup_lines(text)
     # R2 修复（隐性可观测性缺陷）：原本空文本（识别不到任何字，但无异常）
     # 也会标记为 ok 并计入「成功」，污染 ok 计数与合并文件。现显式标记为
     # "empty"，既不计入成功也不进入合并，便于发现「识别失败但没报错」的情况。
@@ -801,20 +808,46 @@ def _unique_path(output_dir, name: str):
         i += 1
 
 
+# 不可见/零宽 Unicode 字符：OCR 引擎偶尔会吐出零宽空格(\u200b)、连字(\u200c/\u200d)、
+# 断词(\u00ad)、BOM(\ufeff) 等，str.split() 默认不把它们当空白，会原样残留进结果，
+# 导致下游字符串比对 / 数据库去重出现「看起来一样实则不等」的隐性 bug。
+INVISIBLE_RE = re.compile(r"[\u200b\u200c\u200d\u2060\ufeff\u00ad]")
+
+
 def normalize_text(text: str) -> str:
-    """规整识别文本：折叠行内连续空白、删除空行、去首尾空白。
+    """规整识别文本：折叠行内连续空白、删除空行、去首尾空白、剔除不可见零宽字符。
 
     R1 新能力：OCR / 识别输出常含多余空格、Tab 与空行，折叠后更利于下游
     消费与阅读（如喂给 LLM、入库、比对），也避免「空行噪声」污染结果。
-    不改变文字内容，仅清理空白排版。
+    不改变可见文字内容，仅清理空白排版与不可见零宽字符。
     """
     if not text:
         return ""
+    text = INVISIBLE_RE.sub("", text)  # R2 修复：剔除零宽/不可见字符，避免隐性串不匹配
     out = []
     for line in text.splitlines():
         s = " ".join(line.split())  # 折叠行内连续空白 + 去首尾空白
         if s:
             out.append(s)
+    return "\n".join(out)
+
+
+def dedup_lines(text: str) -> str:
+    """删除连续重复的行（R1 新能力 --dedup-lines）。
+
+    OCR 常把页眉 / 水印 / 栏目标题重复识别到相邻行，连续重复行对下游
+    检索、比对、入库都是纯噪声。仅折叠「严格相邻且完全一致」的行，
+    中间被空行或其它行隔开的相同行各自保留（避免误删正文中的正常重复）。
+    """
+    if not text:
+        return ""
+    out = []
+    prev = None
+    for line in text.splitlines():
+        if line == prev:
+            continue
+        out.append(line)
+        prev = line
     return "\n".join(out)
 
 
@@ -1267,7 +1300,7 @@ def main(argv=None):
         from concurrent.futures import ThreadPoolExecutor
 
         with ThreadPoolExecutor(max_workers=args.workers) as ex:
-            futures = [ex.submit(process_file, f, recognizer, backend_name, args.retries, args.normalize) for f in files]
+            futures = [ex.submit(process_file, f, recognizer, backend_name, args.retries, args.normalize, args.dedup_lines) for f in files]
             for i, fut in enumerate(futures, 1):
                 res = fut.result()
                 if not args.quiet:
@@ -1277,7 +1310,7 @@ def main(argv=None):
         for i, f in enumerate(files, 1):
             if not args.quiet:
                 print(f"[进度] 处理第 {i}/{len(files)} 个：{f}")
-            res = process_file(f, recognizer, backend_name, args.retries, args.normalize)
+            res = process_file(f, recognizer, backend_name, args.retries, args.normalize, args.dedup_lines)
             results.append(res)
 
     # R2 修复（隐性一致性 bug）：原实现先 write_outputs 再 apply_min_chars，

@@ -462,6 +462,38 @@ def test_normalize_text_pure():
     assert ocr_tool.normalize_text("") == ""
 
 
+def test_normalize_text_strips_invisible_chars():
+    """R2 修复验证：零宽/不可见字符（\u200b 等）会被剔除，否则下游串比对出现
+    「看起来一样实则不等」的隐性 bug。"""
+    assert ocr_tool.normalize_text("a\u200bb") == "ab"  # 零宽空格被去掉（相邻字母直接拼接）
+    assert ocr_tool.normalize_text("c\ufeffd") == "cd"  # BOM 残留被去掉
+    assert ocr_tool.normalize_text("\u200b\u200c\u200dx") == "x"
+
+
+def test_dedup_lines_pure():
+    """R1 验证：dedup_lines 仅折叠严格相邻的重复行。"""
+    assert ocr_tool.dedup_lines("a\na\nb") == "a\nb"
+    assert ocr_tool.dedup_lines("a\na\na") == "a"
+    assert ocr_tool.dedup_lines("") == ""
+    # 被其它行隔开的相同行各自保留（不误删正文正常重复）
+    assert ocr_tool.dedup_lines("a\n\nb\na") == "a\n\nb\na"
+
+
+def test_process_file_dedup_flag(tmp_path):
+    """R1 验证：--dedup-lines（process_file dedup=True）删除连续重复行。"""
+    from pathlib import Path as _P
+
+    f = _P(tmp_path / "dup.png")
+    f.write_bytes(b"fake")
+    repeated = "标题\n标题\n正文\n正文\n结尾"
+    res = ocr_tool.process_file(f, lambda p: (repeated, None), "fake", dedup=True)
+    assert res["status"] == "ok"
+    assert res["text"] == "标题\n正文\n结尾"
+    # 不带 --dedup-lines 时保留原样
+    res2 = ocr_tool.process_file(f, lambda p: (repeated, None), "fake")
+    assert res2["text"] == repeated
+
+
 def test_process_file_normalize_flag(tmp_path):
     """R1 验证：--normalize（process_file normalize=True）规整识别文本。"""
     from pathlib import Path as _P
