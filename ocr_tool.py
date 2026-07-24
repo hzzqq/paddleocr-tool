@@ -303,6 +303,42 @@ def _safe_mtime(p) -> float:
         return 0.0
 
 
+def parse_manifest(path: str) -> "tuple[list[str], list]":
+    """解析清单文件：每行一个路径；空行与 `#` 注释行跳过。
+
+    R1 新能力：支撑 `--input @清单.txt` 把「一批待处理文件 / 目录」
+    固化成可复用的清单（便于 CI / 定时任务 / 复现批次），无需在命令行
+    罗列一长串路径或 glob。返回 (路径片段列表, 跳过列表)；清单文件
+    不可读（缺失 / 无权限 / 目录）时返回 ([], [Path])，由调用方走「跳过并提示」
+    的既有透明路径，不抛错、不中断整批。
+    """
+    skipped = []
+    parts: list[str] = []
+    p = Path(path)
+    if not p.is_file():
+        skipped.append(p)
+        return parts, skipped
+    try:
+        lines = p.read_text(encoding="utf-8", errors="ignore").splitlines()
+    except OSError:
+        skipped.append(p)
+        return parts, skipped
+    # R2 隐性健壮性：清单内的相对路径按「清单文件所在目录」解析，
+    # 使清单自包含（放在子目录也能正确定位素材），而非依赖运行 cwd——
+    # 否则 `@sub/batch.txt`（内含 `a.png`）会被当成 cwd 下的 `a.png` 而
+    # 误报「输入路径不存在」，破坏「可复用批次」的初衷。
+    base = p.parent
+    for line in lines:
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue  # 空行 / 注释跳过
+        lp = Path(line)
+        if not lp.is_absolute():
+            lp = base / lp
+        parts.append(str(lp))
+    return parts, skipped
+
+
 def collect_all(input_spec, recursive, include=None, exts=None, max_depth=None, max_size=None, exclude=None):
     """支持 `--input` 传入多个路径（逗号 / 换行分隔），聚合去重。
 
@@ -311,15 +347,31 @@ def collect_all(input_spec, recursive, include=None, exts=None, max_depth=None, 
 
     R1 新能力：各路径片段支持 glob 模式（如 `dir/*.png`、`imgs/**/*.jpg`），
     自动展开为匹配文件逐个处理，省去用户先 `ls` 再粘贴文件列表。
+    R1 新能力（`@清单`）：片段以 `@` 开头时视为清单文件，逐行展开为
+    路径片段（空行 / `#` 注释跳过），与 glob / 字面路径混用——
+    例如 `--input @batch.txt,extra.png` 即「清单 + 额外单文件」组合批次。
     """
     import glob as _glob
 
     files = []
     skipped = []
-    for part in re.split(r"[,\n]", input_spec or ""):
-        part = part.strip()
-        if not part:
+    raw_parts = re.split(r"[,\n]", input_spec or "")
+    # 先展开 @清单，统一成「路径 / glob 片段」列表再处理
+    expanded: list[str] = []
+    for raw in raw_parts:
+        raw = raw.strip()
+        if not raw:
             continue
+        if raw.startswith("@"):  # R1：@清单文件
+            mp = raw[1:]
+            mparts, mskipped = parse_manifest(mp)
+            if mskipped:
+                skipped.extend(mskipped)
+                print(f"[提示] 清单文件不可读或不存在，已跳过：{mp}")
+            expanded.extend(mparts)
+            continue
+        expanded.append(raw)
+    for part in expanded:
         # R1：glob 模式展开（含 * ? [ ]）。此前这类输入会被当字面路径，
         # 命中「路径不存在」分支静默失败（R2 隐性可用性缺陷）。
         if any(ch in part for ch in "*?["):

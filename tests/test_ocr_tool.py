@@ -63,6 +63,52 @@ def test_collect_files_skips_hidden_dir(tmp_path):
     assert any(f.name == "config.png" for f in skipped)
 
 
+def test_parse_manifest(tmp_path):
+    """R1 新需求验证：@清单解析——空行与 # 注释跳过，逐行展开。"""
+    mf = tmp_path / "batch.txt"
+    mf.write_text("\n# 这是注释\na.png\n  b.png  \n\nc.pdf\n", encoding="utf-8")
+    (tmp_path / "a.png").write_bytes(b"\x89PNG")
+    (tmp_path / "b.png").write_bytes(b"\x89PNG")
+    (tmp_path / "c.pdf").write_bytes(b"%PDF")
+    parts, skipped = ocr_tool.parse_manifest(str(mf))
+    # 相对清单内的相对路径按清单目录解析为绝对路径（自包含）
+    expected = [str(tmp_path / n) for n in ("a.png", "b.png", "c.pdf")]
+    assert parts == expected  # 注释/空行被剔除，空白被 strip
+    assert skipped == []  # 清单可读，无跳过
+
+
+def test_parse_manifest_unreadable(tmp_path):
+    """R2 健壮化：清单文件不存在/不可读时安全返回空片段+跳过项，不抛错。"""
+    parts, skipped = ocr_tool.parse_manifest(str(tmp_path / "nope.txt"))
+    assert parts == []
+    assert len(skipped) == 1
+
+
+def test_collect_all_manifest(tmp_path):
+    """R1 新需求验证：--input @清单 与字面/额外路径组合批次。"""
+    (tmp_path / "a.png").write_bytes(b"\x89PNG")
+    (tmp_path / "b.png").write_bytes(b"\x89PNG")
+    (tmp_path / "c.pdf").write_bytes(b"%PDF")
+    (tmp_path / "skip.txt").write_text("x")
+    mf = tmp_path / "batch.txt"
+    mf.write_text("a.png\nb.png\n", encoding="utf-8")
+    # c.pdf 字面路径 + 一个不应被收纳的 skip.txt（不在白名单）一起传入验证跳过
+    files, skipped = ocr_tool.collect_all(
+        f"@{mf},{tmp_path / 'c.pdf'},{tmp_path / 'skip.txt'}", False, exts=None
+    )
+    names = {f.name for f in files}
+    # 清单里的 a/b 与额外的 c.pdf 都应被纳入
+    assert names == {"a.png", "b.png", "c.pdf"}
+    assert any(s.name == "skip.txt" for s in skipped)  # txt 不在白名单，计入跳过
+
+
+def test_collect_all_manifest_missing_is_skipped(tmp_path):
+    """R2 隐性可观测性：不可读清单计入 skipped 而非静默崩溃。"""
+    files, skipped = ocr_tool.collect_all("@missing.txt", False)
+    assert files == []
+    assert any(s.name == "missing.txt" for s in skipped)
+
+
 def test_process_file_retries_then_succeeds(tmp_path):
     """R1 新需求验证：--retries 让偶发失败的单图识别自动重试直至成功。"""
     calls = {"n": 0}
