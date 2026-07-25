@@ -20,12 +20,17 @@ import argparse
 import csv
 import fnmatch
 import json
+import logging
 import os
 import re
 import sys
 import threading
 import time
 from pathlib import Path
+
+from log_utils import setup_logging
+
+log = logging.getLogger("paddleocr")
 
 # 支持的图片扩展名（小写）
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".bmp"}
@@ -149,6 +154,10 @@ def parse_args(argv=None):
     parser.add_argument("--report", default=None,
                         help="R1 新能力：把运行报告（各状态计数 + 各状态文件清单 + 建议重跑清单）"
                              "以 JSON 写入该路径，便于流水线/人工快速定位需重跑的文件")
+    parser.add_argument("--log-level", default="INFO",
+                        help="R1 新能力：日志级别 DEBUG/INFO/WARNING/ERROR（诊断信息写 stderr，不污染 stdout 结果）")
+    parser.add_argument("--log-file", default=None,
+                        help="R1 新能力：日志输出文件（默认 stderr；批处理可落盘排查）")
     return parser.parse_args(argv)
 
 
@@ -734,6 +743,7 @@ def process_file(file_path, recognizer, backend_name, retries: int = 0, normaliz
                 except Exception as e:
                     page_errors += 1
                     pages.append(f"--- 第 {idx} 页 ---\n[第 {idx} 页识别失败：{e}]")
+                    log.warning("第 %d 页识别失败 %s: %s", idx, file_path, e)
             text = "\n\n".join(pages)
             # R2 修复（隐性健壮性问题）：原实现任一页异常即把整份 PDF 标 error 并
             # 丢弃其余已成功页文本；现仅当「全部页都失败」才标 error，否则保留
@@ -755,6 +765,7 @@ def process_file(file_path, recognizer, backend_name, retries: int = 0, normaliz
         status = "error"
         error_msg = str(e)
         print(f"[错误] 处理失败 {file_path}：{e}")
+        log.error("处理失败 %s: %s", file_path, e)
     # R2 防护（隐性崩溃风险）：识别器可能返回 None 文本（如退化的自定义识别
     # 函数、或某页返回 (None, None)），后续 `len(text)` 会抛 TypeError 直接
     # 中断整批处理。统一规整为字符串，再交给下方「空文本 -> empty」逻辑处理，
@@ -836,19 +847,51 @@ def dedup_lines(text: str) -> str:
     """删除连续重复的行（R1 新能力 --dedup-lines）。
 
     OCR 常把页眉 / 水印 / 栏目标题重复识别到相邻行，连续重复行对下游
-    检索、比对、入库都是纯噪声。仅折叠「严格相邻且完全一致」的行，
+    检索、比对、入库都是纯噪声。仅折叠「严格相邻且语义一致」的行，
     中间被空行或其它行隔开的相同行各自保留（避免误删正文中的正常重复）。
+
+    R2 修复（隐性去重漏判）：原实现按行的「原始字符串严格相等」判断重复，
+    导致仅首尾/行内空白不同的同一行（如「公司名称\\t」与「公司名称」、
+    页眉带尾随空格）被判为不重复而保留，去重失效、噪声仍残留。现比较前
+    先按空白规整（与 normalize_text 口径一致），空白差异不再阻碍去重。
     """
     if not text:
         return ""
     out = []
-    prev = None
+    prev_norm = None
     for line in text.splitlines():
-        if line == prev:
+        norm = " ".join(line.split())
+        if norm and norm == prev_norm:
             continue
         out.append(line)
-        prev = line
+        prev_norm = norm
     return "\n".join(out)
+
+
+def merge_results_text(results, include_statuses=("ok",),
+                       header_fmt: str = "===== {name} =====") -> str:
+    """把多个识别结果拼接为单段文本（R1 新能力，供下游整体消费）。
+
+    常见场景：把一批 OCR 结果整体喂给 LLM 做摘要 / 全文检索 / 跨文件 diff，
+    免去调用方自行拼装与处理「错误占位文本」。每个结果以文件名小标题分隔，
+    便于下游定位来源。
+
+    - include_statuses：仅合并这些状态的结果（默认只合并 "ok"）；
+      error / skipped_pdf 默认跳过，避免把「[第 N 页识别失败]」之类的占位
+      文本混进下游语料（R2 隐性污染：错误占位一旦进入检索/摘要语料会拉低质量）。
+    - 单条 text 为空（无信息量）也跳过；
+    - 不修改入参，返回新字符串（R3 纯度）。
+    """
+    blocks = []
+    for r in results:
+        if r.get("status") not in include_statuses:
+            continue
+        text = r.get("text") or ""
+        if not text.strip():
+            continue
+        name = Path(r.get("file", "")).name
+        blocks.append(f"{header_fmt.format(name=name)}\n{text}")
+    return "\n\n".join(blocks)
 
 
 def write_markdown(result, output_dir):
@@ -1154,6 +1197,11 @@ def collect_low_conf(results, threshold: float) -> list:
 
 def main(argv=None):
     args = parse_args(argv)
+    # R1 新能力：诊断日志（进度/警告/错误）写 stderr 或 --log-file，不污染 stdout 结果
+    try:
+        setup_logging(args.log_level, args.log_file)
+    except Exception:
+        pass
     # R1 新能力：--lang-list 仅列出支持的语言即退出，不要求 --input/--output
     if args.lang_list:
         if args.json:
@@ -1222,6 +1270,8 @@ def main(argv=None):
     print(f"输入：{args.input}　输出：{args.output}")
     print(f"后端：{'mock' if args.mock else args.backend}　语言：{args.lang}　格式：{args.format}"
           f"　递归：{args.recursive}　并行：{args.workers}　最低置信度：{args.min_conf}")
+    log.info("开始批处理 input=%s output=%s backend=%s lang=%s workers=%d",
+             args.input, args.output, 'mock' if args.mock else args.backend, args.lang, args.workers)
 
     files, skipped = collect_all(
         args.input, args.recursive, include=args.include, exts=args.ext,
@@ -1341,6 +1391,7 @@ def main(argv=None):
     ok = sum(1 for r in results if r["status"] == "ok")
     errored = sum(1 for r in results if r["status"] == "error")
     print(f"[汇总] 成功 {ok}/{len(results)}，结果见：{args.output}")
+    log.info("批处理完成 input=%s 成功=%d 失败=%d 总计=%d", args.input, ok, errored, len(results))
     # R1 新能力：--fail-on-error 把「部分文件识别失败」升级为非零退出码，
     # 便于 CI / 流水线把静默的部分失败暴露为构建失败，而非默认吞掉（exit 0）。
     if errored and args.fail_on_error:
