@@ -1429,3 +1429,55 @@ def test_main_low_conf_threshold_zero_no_report_written(tmp_path):
     ])
     assert rc == 0
     assert not (out / "low_confidence.txt").exists()
+
+
+def test_dedup_lines_ignores_whitespace_only_diff():
+    """R2 验证：仅首尾/行内空白不同的同一行也应被去重。
+
+    注意：dedup_lines 仅在「比较」阶段按空白规整（与 normalize_text 口径一致），
+    输出保留首次出现的原始行文本（不篡改正文格式），因此下方期望保留原始空白。
+    """
+    # "公司名称\t" 与 "公司名称" 规整后相同 -> 去重保留首条（原始空白）
+    assert ocr_tool.dedup_lines("公司名称\t\n公司名称\n正文") == "公司名称\t\n正文"
+    # 行内连续空白规整后与下行相同 -> 去重，保留首次出现的原始行
+    assert ocr_tool.dedup_lines("a  b\n a b\nc") == "a  b\nc"
+
+
+def test_dedup_lines_preserves_separated_duplicates():
+    """回归：被空行/其它行隔开的相同行仍保留。"""
+    assert ocr_tool.dedup_lines("a\n\nb\na") == "a\n\nb\na"
+
+
+def test_merge_results_text_skips_errors():
+    """R1 验证：merge_results_text 默认跳过 error/空文本，仅合并 ok。"""
+    results = [
+        {"file": "a.png", "text": "合同第一条", "status": "ok"},
+        {"file": "b.png", "text": "", "status": "empty"},
+        {"file": "c.png", "text": "[第 1 页识别失败：超时]", "status": "error"},
+    ]
+    merged = ocr_tool.merge_results_text(results)
+    assert "合同第一条" in merged
+    assert "识别失败" not in merged          # 错误占位被排除（R2 防污染）
+    assert "c.png" not in merged
+    assert "a.png" in merged
+
+
+def test_merge_results_text_include_filtered():
+    """R1 验证：include_statuses 可放宽到 filtered/empty（按需）。"""
+    results = [
+        {"file": "a.png", "text": "x", "status": "ok"},
+        {"file": "b.png", "text": "y", "status": "filtered"},
+        {"file": "c.png", "text": "", "status": "empty"},
+    ]
+    merged = ocr_tool.merge_results_text(results, include_statuses=("ok", "filtered"))
+    assert "a.png" in merged and "b.png" in merged
+    assert "c.png" not in merged            # empty 仍被空文本跳过
+
+
+def test_merge_results_text_no_mutate():
+    """R3 纯度：不修改入参。"""
+    results = [{"file": "a.png", "text": "x", "status": "ok"}]
+    before = [dict(r) for r in results]
+    ocr_tool.merge_results_text(results)
+    assert results == before
+

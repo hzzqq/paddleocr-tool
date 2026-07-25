@@ -41,6 +41,9 @@ with st.sidebar:
     combine = st.checkbox("合并输出（生成 _combined.md/.txt）", value=False)
     dry_run = st.checkbox("仅预检（统计待处理文件，不执行 OCR）", value=False)
     quiet = st.checkbox("静默模式（--quiet，减少逐文件日志）", value=False)
+    exclude = st.text_input("排除文件（--exclude，可选）", placeholder="如 *tmp* 或 草稿")
+    normalize = st.checkbox("规整空白（--normalize，折叠换行/去首尾空白）", value=False)
+    dedup_lines = st.checkbox("删除连续重复行（--dedup-lines，去页眉水印）", value=False)
 
     start = st.button("开始识别", type="primary")
 
@@ -79,6 +82,12 @@ if start:
             cmd.append("--dry-run")
         if quiet:
             cmd.append("--quiet")
+        if exclude:
+            cmd += ["--exclude", exclude]
+        if normalize:
+            cmd.append("--normalize")
+        if dedup_lines:
+            cmd.append("--dedup-lines")
 
         log_box = st.empty()
         progress = st.progress(0, text="准备中…")
@@ -126,14 +135,27 @@ if start:
                         ok = sum(1 for d in data if d.get("status") == "ok")
                         skp = sum(1 for d in data if d.get("status") == "skipped_pdf")
                         err = sum(1 for d in data if d.get("status") == "error")
-                        c1, c2, c3, c4 = st.columns(4)
+                        emp = sum(1 for d in data if d.get("status") == "empty")
+                        flt = sum(1 for d in data if d.get("status") == "filtered")
+                        c1, c2, c3, c4, c5, c6 = st.columns(6)
                         c1.metric("成功", ok)
                         c2.metric("跳过", skp)
                         c3.metric("失败", err)
-                        c4.metric("总计", len(data))
+                        c4.metric("空结果", emp)
+                        c5.metric("已过滤", flt)
+                        c6.metric("总计", len(data))
 
-                        # 状态徽章着色，一眼区分 ok / 跳过 / 失败
-                        badge = {"ok": "🟢", "skipped_pdf": "🟡", "error": "🔴"}
+                        # 状态徽章着色，一眼区分各类结果：
+                        # R2 补齐 empty / filtered 两类后端已产出的状态
+                        # （此前 UI 只认 ok/skipped_pdf/error，空结果与过滤项
+                        # 被标成未知 ⚪，且指标卡不展示，与实际产物口径不一致）。
+                        badge = {
+                            "ok": "🟢",
+                            "skipped_pdf": "🟡",
+                            "error": "🔴",
+                            "empty": "⚪",
+                            "filtered": "🟣",
+                        }
                         st.subheader("逐文件结果")
                         for item in data:
                             sts = item.get("status", "")
