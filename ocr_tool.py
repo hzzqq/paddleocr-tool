@@ -146,6 +146,10 @@ def parse_args(argv=None):
                         help="R1 新能力：规整识别文本——折叠行内连续空白、删除空行、去首尾空白、剔除不可见零宽字符，输出更利于下游消费")
     parser.add_argument("--dedup-lines", action="store_true",
                         help="R1 新能力：删除连续重复行（页眉/水印噪声），仅折叠严格相邻的重复行，不误删正文正常重复")
+    parser.add_argument("--redact-pattern", action="append", default=None, metavar="REGEX",
+                        help="R1 新能力：隐私脱敏正则（可多次指定），命中片段统一打码为 ***，"
+                             "降低证件/票据 OCR 结果外发时的隐私泄露面，如 --redact-pattern '\\d{17}[\\dX]' --redact-pattern '1[3-9]\\d{9}'；"
+                             "非法正则仅告警并跳过，不影响其余规则")
     parser.add_argument("--max-files", type=int, default=0,
                         help="最多处理的文件数（0 表示不限制），便于对大目录做抽样 / 试跑")
     parser.add_argument("--sort", choices=["name", "size", "mtime"], default="name",
@@ -719,13 +723,15 @@ def _recognize_with_retry(recognizer, image_input, retries: int):
     raise last_exc
 
 
-def process_file(file_path, recognizer, backend_name, retries: int = 0, normalize: bool = False, dedup: bool = False):
+def process_file(file_path, recognizer, backend_name, retries: int = 0, normalize: bool = False, dedup: bool = False, redact=None):
     """处理单个文件，返回结果字典。
 
     对 PDF 会先转图再逐页识别，合并文本。
     retries：单页/单图识别失败时的最大重试次数（R1 新能力，默认 0 不重试）。
     normalize：是否对识别文本做空白规整（R1 新能力，--normalize）。
     dedup：是否删除连续重复行（R1 新能力，--dedup-lines）。
+    redact：可选正则模式列表（R1 新能力，--redact-pattern），命中片段脱敏为
+    `***`，降低证件/票据 OCR 结果的隐私泄露面（见 redact_text）。
     """
     ext = file_path.suffix.lower()
     start = time.time()
@@ -792,6 +798,12 @@ def process_file(file_path, recognizer, backend_name, retries: int = 0, normaliz
     # 空文本判定之前，保证最终写出的 text 已是去重结果（逐文件/合并产物一致）。
     if dedup:
         text = dedup_lines(text)
+    # R1 新能力：隐私脱敏（OCR 证件/票据敏感信息外发前打码）。放在规整/去重之后、
+    # 空文本判定之前，保证最终写出的 text 已是脱敏结果（逐文件/合并产物一致）。
+    # redact_text 对非法正则安全跳过，单条规则失效不影响其余。
+    redact_count = 0
+    if redact:
+        text, redact_count = redact_text(text, redact)
     # R2 修复（隐性可观测性缺陷）：原本空文本（识别不到任何字，但无异常）
     # 也会标记为 ok 并计入「成功」，污染 ok 计数与合并文件。现显式标记为
     # "empty"，既不计入成功也不进入合并，便于发现「识别失败但没报错」的情况。
@@ -812,6 +824,7 @@ def process_file(file_path, recognizer, backend_name, retries: int = 0, normaliz
         "error": error_msg,
         "avg_conf": avg_conf,
         "min_conf": min_conf_out,
+        "redact_count": redact_count,
     }
 
 
@@ -882,6 +895,40 @@ def dedup_lines(text: str) -> str:
         out.append(line)
         prev_norm = norm
     return "\n".join(out)
+
+
+# 默认脱敏掩码（R1 新能力：隐私脱敏）
+REDACT_MASK = "***"
+
+
+def redact_text(text: str, patterns) -> "tuple[str, int]":
+    """按正则模式对文本做隐私脱敏，返回 (脱敏后文本, 命中条数)。
+
+    R1 新能力：OCR 常从证件/票据/合同扫描件里抽出身份证号、手机号、银行卡、
+    邮箱等敏感信息，直接落盘或喂给 LLM 有泄露风险。这里允许调用方传入一组
+    正则（如身份证 `\\d{17}[\\dX]`、手机号 `1[3-9]\\d{9}`），把命中片段统一
+    替换为 `***`，降低外发文本的隐私面。
+
+    R2 隐性健壮性：单个非法正则（如未闭合括号）若直接 re.sub 会抛
+    re.error 中断整批处理；这里逐个编译，编译失败的pattern记录警告并跳过，
+    其余正常生效。空 patterns / 空文本安全返回（原文本, 0）。纯函数、不修改
+    入参，便于单测与复用（CLI、UI、批量流水线路径一致）。
+    """
+    if not text or not patterns:
+        return text, 0
+    count = 0
+    out = text
+    for pat in patterns:
+        if not pat:
+            continue
+        try:
+            rx = re.compile(pat)
+        except re.error as e:
+            log.warning("脱敏正则编译失败，已跳过：%s (%s)", pat, e)
+            continue
+        out, n = rx.subn(REDACT_MASK, out)
+        count += n
+    return out, count
 
 
 def merge_results_text(results, include_statuses=("ok",),
@@ -988,7 +1035,7 @@ def write_combined(results, output_dir, fmt, status_filter=None):
         with open(path, "w", encoding="utf-8-sig", newline="") as f:
             writer = csv.DictWriter(
                 f, fieldnames=["file", "text", "chars", "elapsed", "status",
-                               "error", "avg_conf", "min_conf"]
+                               "error", "avg_conf", "min_conf", "redact_count"]
             )
             writer.writeheader()
             for r in ok_results:
@@ -1028,7 +1075,7 @@ def write_outputs(results, output_dir, fmt, combine=False, status_filter=None, s
     with open(csv_path, "w", encoding="utf-8-sig", newline="") as f:
         writer = csv.DictWriter(
             f, fieldnames=["file", "text", "chars", "elapsed", "status",
-                           "error", "avg_conf", "min_conf"]
+                           "error", "avg_conf", "min_conf", "redact_count"]
         )
         writer.writeheader()
         for r in results:
@@ -1381,7 +1428,7 @@ def main(argv=None):
         from concurrent.futures import ThreadPoolExecutor
 
         with ThreadPoolExecutor(max_workers=args.workers) as ex:
-            futures = [ex.submit(process_file, f, recognizer, backend_name, args.retries, args.normalize, args.dedup_lines) for f in files]
+            futures = [ex.submit(process_file, f, recognizer, backend_name, args.retries, args.normalize, args.dedup_lines, args.redact_pattern) for f in files]
             for i, fut in enumerate(futures, 1):
                 res = fut.result()
                 if not args.quiet:
@@ -1391,7 +1438,7 @@ def main(argv=None):
         for i, f in enumerate(files, 1):
             if not args.quiet:
                 print(f"[进度] 处理第 {i}/{len(files)} 个：{f}", file=_log)
-            res = process_file(f, recognizer, backend_name, args.retries, args.normalize, args.dedup_lines)
+            res = process_file(f, recognizer, backend_name, args.retries, args.normalize, args.dedup_lines, args.redact_pattern)
             results.append(res)
 
     # R2 修复（隐性一致性 bug）：原实现先 write_outputs 再 apply_min_chars，

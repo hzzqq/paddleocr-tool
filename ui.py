@@ -45,6 +45,7 @@ with st.sidebar:
     exclude = st.text_input("排除文件（--exclude，可选）", placeholder="如 *tmp* 或 草稿")
     normalize = st.checkbox("规整空白（--normalize，折叠换行/去首尾空白）", value=False)
     dedup_lines = st.checkbox("删除连续重复行（--dedup-lines，去页眉水印）", value=False)
+    redact_patterns = st.text_input("隐私脱敏正则（--redact-pattern，逗号分隔，可选）", placeholder="如 \\d{17}[\\dX],1[3-9]\\d{9}")
 
     start = st.button("开始识别", type="primary")
 
@@ -91,6 +92,9 @@ if start:
             cmd.append("--normalize")
         if dedup_lines:
             cmd.append("--dedup-lines")
+        if redact_patterns:
+            for pat in [p.strip() for p in redact_patterns.split(",") if p.strip()]:
+                cmd += ["--redact-pattern", pat]
         if not use_angle:
             cmd.append("--no-angle")
 

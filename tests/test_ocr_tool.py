@@ -128,6 +128,48 @@ def test_process_file_retries_then_succeeds(tmp_path):
     assert calls["n"] == 3  # 重试两次后第 3 次成功
 
 
+def test_redact_text_masks_patterns():
+    """R1 新需求验证：redact_text 按正则打码敏感信息。"""
+    text = "身份证 110105199003078888 手机 13812345678"
+    out, n = ocr_tool.redact_text(
+        text, [r"\d{17}[\dX]", r"1[3-9]\d{9}"]
+    )
+    assert n == 2
+    assert out.count("***") == 2
+    assert "110105199003078888" not in out
+    assert "13812345678" not in out
+
+
+def test_redact_text_invalid_pattern_skipped():
+    """R2 隐性健壮性：非法正则仅告警跳过，不中断其余规则、不抛错。"""
+    out, n = ocr_tool.redact_text("订单 12345 备注 ok", [r"([", r"\d+"])
+    assert n == 1  # 仅合法 \d+ 生效
+    assert "12345" not in out
+    assert "ok" in out
+
+
+def test_redact_text_empty_safe():
+    """R2 边界：空文本 / 空规则安全返回。"""
+    assert ocr_tool.redact_text("", [r"\d+"]) == ("", 0)
+    assert ocr_tool.redact_text("abc", None) == ("abc", 0)
+    assert ocr_tool.redact_text("abc", []) == ("abc", 0)
+
+
+def test_process_file_redacts(tmp_path):
+    """R1 新需求验证：process_file 把 redact 规则落到最终 text 并报告 redact_count。"""
+    def fake_recognizer(img):
+        return ("客户手机 13812345678 谢谢", [0.95])
+
+    f = tmp_path / "a.png"
+    f.write_bytes(b"\x89PNG")
+    res = ocr_tool.process_file(f, fake_recognizer, "paddle", redact=[r"1[3-9]\d{9}"])
+    assert res["status"] == "ok"
+    assert res["redact_count"] == 1
+    assert "13812345678" not in res["text"]
+    assert "***" in res["text"]
+
+
+
 def test_process_file_retries_exhausted(tmp_path):
     """重试耗尽仍失败应标记为 error（而非静默成功）。"""
 

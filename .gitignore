@@ -8,3 +8,6 @@ results.csv
 
 # pytest 临时目录（verify_all.py 固定 basetemp）
 .pytest_tmp/
+
+# 运行报告/诊断日志
+_rpt.log
