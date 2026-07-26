@@ -1290,10 +1290,16 @@ def main(argv=None):
         args.workers = MAX_WORKERS
     if args.workers < 1:
         args.workers = 1
-    print(f"=== PaddleOCR 批量图文抽取工具 ===")
-    print(f"输入：{args.input}　输出：{args.output}")
+    # R1 新能力：--output - 走 stdout 管道模式（每行一条 JSON，便于 grep/jq/流水线），
+    # 此时所有诊断/进度输出改走 stderr，保证 stdout 只有纯净的 JSONL。
+    # R2 修复：此前 --output - 会被当成目录名 `Path("-").mkdir()` 在 cwd 下创建
+    # 一个字面量 "-" 文件夹（隐性 bug），现识别为管道模式并正确输出到 stdout。
+    stdout_mode = (args.output == "-")
+    _log = sys.stderr if stdout_mode else sys.stdout
+    print(f"=== PaddleOCR 批量图文抽取工具 ===", file=_log)
+    print(f"输入：{args.input}　输出：{args.output}", file=_log)
     print(f"后端：{'mock' if args.mock else args.backend}　语言：{args.lang}　格式：{args.format}"
-          f"　递归：{args.recursive}　并行：{args.workers}　最低置信度：{args.min_conf}")
+          f"　递归：{args.recursive}　并行：{args.workers}　最低置信度：{args.min_conf}", file=_log)
     log.info("开始批处理 input=%s output=%s backend=%s lang=%s workers=%d",
              args.input, args.output, 'mock' if args.mock else args.backend, args.lang, args.workers)
 
@@ -1306,11 +1312,12 @@ def main(argv=None):
         # 用户只能看到「未找到」却不知为何被排除；这里显式说明跳过情况。
         if skipped:
             example = skipped[0].name
-            print(f"[提示] 未找到可处理的图片 / PDF 文件；另有 {len(skipped)} 个文件因类型不支持、隐藏或超过体积上限被跳过（例如：{example}）。")
+            print(f"[提示] 未找到可处理的图片 / PDF 文件；另有 {len(skipped)} 个文件因类型不支持、隐藏或超过体积上限被跳过（例如：{example}）。", file=_log)
         else:
-            print("[提示] 未找到可处理的图片 / PDF 文件。")
-        # 仍创建输出目录，避免下游报错（dry-run 无 --output 时跳过）
-        if args.output:
+            print("[提示] 未找到可处理的图片 / PDF 文件。", file=_log)
+        # 仍创建输出目录，避免下游报错（dry-run 无 --output 时跳过）；
+        # 管道模式（--output -）不创建任何文件，也不写汇总，直接结束。
+        if args.output and not stdout_mode:
             Path(args.output).mkdir(parents=True, exist_ok=True)
             write_outputs([], args.output, args.format, summary_name=args.summary_file)
         return 0
@@ -1368,7 +1375,7 @@ def main(argv=None):
         print(f"[提示] 置信度相关选项（--min-conf / --low-conf-threshold）仅 paddle 后端生效，"
               f"当前后端为 {backend_name}，这些选项不会生效。")
 
-    print(f"[信息] 使用后端：{backend_name}，共 {len(files)} 个文件")
+    print(f"[信息] 使用后端：{backend_name}，共 {len(files)} 个文件", file=_log)
     results = []
     if args.workers and args.workers > 1:
         from concurrent.futures import ThreadPoolExecutor
@@ -1378,12 +1385,12 @@ def main(argv=None):
             for i, fut in enumerate(futures, 1):
                 res = fut.result()
                 if not args.quiet:
-                    print(f"[进度] 完成 {i}/{len(files)}：{res['file']} ({res['status']})")
+                    print(f"[进度] 完成 {i}/{len(files)}：{res['file']} ({res['status']})", file=_log)
                 results.append(res)
     else:
         for i, f in enumerate(files, 1):
             if not args.quiet:
-                print(f"[进度] 处理第 {i}/{len(files)} 个：{f}")
+                print(f"[进度] 处理第 {i}/{len(files)} 个：{f}", file=_log)
             res = process_file(f, recognizer, backend_name, args.retries, args.normalize, args.dedup_lines)
             results.append(res)
 
@@ -1402,7 +1409,19 @@ def main(argv=None):
         if not status_filter:
             status_filter = None
         else:
-            print(f"[提示] 仅写出状态为 {','.join(status_filter)} 的逐文件/合并产物（审计文件仍含全部结果）")
+            print(f"[提示] 仅写出状态为 {','.join(status_filter)} 的逐文件/合并产物（审计文件仍含全部结果）", file=_log)
+    # R1 管道模式：--output - 时每条结果一行 JSON 直接写 stdout（便于流水线消费），
+    # 跳过磁盘汇总/合并/报告文件；诊断信息此前已导向 stderr。
+    if stdout_mode:
+        for r in results:
+            print(json.dumps(r, ensure_ascii=False))
+        ok = sum(1 for r in results if r["status"] == "ok")
+        errored = sum(1 for r in results if r["status"] == "error")
+        log.info("批处理完成(input=%s 成功=%d 失败=%d 总计=%d)", args.input, ok, errored, len(results))
+        if errored and args.fail_on_error:
+            print(f"[失败] 有 {errored} 个文件识别失败，因 --fail-on-error 退出码置为 1。", file=sys.stderr)
+            return 1
+        return 0
     write_outputs(results, args.output, args.format, combine=args.combine,
                   status_filter=status_filter, summary_name=args.summary_file)
     # R1 新能力：写出机器可读运行报告（含各状态文件清单 + 建议重跑清单），
@@ -1415,7 +1434,7 @@ def main(argv=None):
         print(f"[完成] 已写出运行报告：{args.report}")
     ok = sum(1 for r in results if r["status"] == "ok")
     errored = sum(1 for r in results if r["status"] == "error")
-    print(f"[汇总] 成功 {ok}/{len(results)}，结果见：{args.output}")
+    print(f"[汇总] 成功 {ok}/{len(results)}，结果见：{args.output}", file=_log)
     log.info("批处理完成 input=%s 成功=%d 失败=%d 总计=%d", args.input, ok, errored, len(results))
     # R1 新能力：--fail-on-error 把「部分文件识别失败」升级为非零退出码，
     # 便于 CI / 流水线把静默的部分失败暴露为构建失败，而非默认吞掉（exit 0）。

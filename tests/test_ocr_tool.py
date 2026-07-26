@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -1563,4 +1564,26 @@ def test_merge_results_text_no_mutate():
     before = [dict(r) for r in results]
     ocr_tool.merge_results_text(results)
     assert results == before
+
+
+def test_main_output_dash_pipes_jsonl(tmp_path, capsys):
+    """R1 新需求验证：--output - 把每条结果以 JSON 行输出到 stdout（管道友好）；
+    R2 验证：诊断/进度信息改走 stderr，stdout 只有纯净 JSONL（无 '===' 横幅污染）。"""
+    (tmp_path / "a.png").write_bytes(b"\x89PNG")
+    (tmp_path / "b.png").write_bytes(b"\x89PNG")
+    rc = ocr_tool.main([
+        "--input", str(tmp_path), "--output", "-", "--mock",
+    ])
+    assert rc == 0
+    out = capsys.readouterr().out
+    # stdout 不应包含横幅/进度等诊断文本
+    assert "===" not in out
+    assert "[进度]" not in out
+    lines = [ln for ln in out.splitlines() if ln.strip()]
+    assert len(lines) == 2
+    parsed = [json.loads(ln) for ln in lines]
+    assert {Path(r["file"]).name for r in parsed} == {"a.png", "b.png"}
+    assert all(r["status"] == "ok" for r in parsed)
+    # 确认 cwd 没有被创建字面量 "-" 目录（R2 隐性 bug 修复）
+    assert not os.path.exists("-")
 

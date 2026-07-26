@@ -5,3 +5,6 @@ _smoke/
 results.json
 results.csv
 *.md.bak
+
+# pytest 临时目录（verify_all.py 固定 basetemp）
+.pytest_tmp/
