@@ -206,6 +206,47 @@ def test_recognize_paddle_min_conf_filter():
     assert conf == []
 
 
+def test_no_angle_flag_parsing():
+    """R1 新需求：--no-angle 关闭角度分类、--angle 显式开启，且默认开启。"""
+    assert ocr_tool.parse_args(["--no-angle"]).use_angle_cls is False
+    assert ocr_tool.parse_args(["--angle"]).use_angle_cls is True
+    assert ocr_tool.parse_args([]).use_angle_cls is True
+
+
+class _AngleSpyOCR:
+    instances = 0
+    last_cls = None
+
+    def __init__(self, use_angle_cls=True, lang="ch"):
+        _AngleSpyOCR.instances += 1
+        self.use_angle_cls = use_angle_cls
+        self.lang = lang
+
+    def ocr(self, img_path, cls=True):
+        _AngleSpyOCR.last_cls = cls
+        return [[_make_line("文本", 0.9)]]
+
+
+def test_recognize_paddle_angle_rebuilds_singleton():
+    """R2 修复验证：单例缓存键必须包含 use_angle_cls，否则切换 --no-angle
+    后仍复用旧（角度开启）实例、导致开关失效。这里断言切换后识别器被重建，
+    且 ocr 调用的 cls 参数与 use_angle_cls 一致。"""
+    ocr_tool._paddle_recognizer = None
+    ocr_tool._paddle_recognizer_lang = None
+    ocr_tool._paddle_recognizer_angle = None
+    before = _AngleSpyOCR.instances
+    ocr_tool.recognize_paddle(_AngleSpyOCR, "a.png", "ch", use_angle_cls=True)
+    built_with_true = _AngleSpyOCR.instances - before
+    # 切换到 --no-angle：应重建实例并透传 cls=False
+    ocr_tool.recognize_paddle(_AngleSpyOCR, "b.png", "ch", use_angle_cls=False)
+    assert _AngleSpyOCR.instances - before == built_with_true + 1
+    assert _AngleSpyOCR.last_cls is False
+    # 再次以 True 调用：又应重建一次（缓存键含 angle）
+    ocr_tool.recognize_paddle(_AngleSpyOCR, "c.png", "ch", use_angle_cls=True)
+    assert _AngleSpyOCR.instances - before == built_with_true + 2
+    assert _AngleSpyOCR.last_cls is True
+
+
 def test_process_file_captures_error_and_chars():
     """隐性问题修复验证：处理异常应被捕获并写入 error 字段，同时记录 chars。"""
     def boom(img):
@@ -231,6 +272,48 @@ def test_write_outputs_txt_format(tmp_path):
     assert (tmp_path / "results.json").exists()
     assert (tmp_path / "results.csv").exists()
     assert (tmp_path / "summary.txt").exists()
+
+
+def test_write_outputs_custom_summary_name(tmp_path):
+    """R1 新需求：--summary-file 自定义汇总文件名（相对 output 的子路径）。"""
+    results = [
+        {"file": "a.png", "text": "你好世界", "chars": 4,
+         "elapsed": 0.1, "status": "ok", "error": ""}
+    ]
+    ocr_tool.write_outputs(results, str(tmp_path), "md", summary_name="run1_summary.txt")
+    assert not (tmp_path / "summary.txt").exists()  # 默认名不再写出
+    custom = tmp_path / "run1_summary.txt"
+    assert custom.exists()
+    assert "成功(ok)：1" in custom.read_text(encoding="utf-8")
+
+
+def test_write_outputs_summary_creates_parent_dir(tmp_path):
+    """R2 边界：--summary-file 指向不存在的嵌套目录时，父目录应自动创建。"""
+    results = [
+        {"file": "a.png", "text": "x", "chars": 1,
+         "elapsed": 0.1, "status": "ok", "error": ""}
+    ]
+    nested = tmp_path / "nested" / "deep" / "my_summary.txt"
+    ocr_tool.write_outputs(results, str(tmp_path), "md", summary_name=str(nested))
+    assert nested.exists()
+
+
+def test_write_outputs_summary_absolute_path(tmp_path):
+    """R2 边界：--summary-file 为绝对路径时，写到该绝对位置（不限于 output_dir）。"""
+    import tempfile, os
+    results = [
+        {"file": "a.png", "text": "x", "chars": 1,
+         "elapsed": 0.1, "status": "ok", "error": ""}
+    ]
+    ext = tempfile.mkdtemp()
+    abs_sum = os.path.join(ext, "abs_summary.txt")
+    try:
+        ocr_tool.write_outputs(results, str(tmp_path), "md", summary_name=abs_sum)
+        assert os.path.exists(abs_sum)
+    finally:
+        if os.path.exists(abs_sum):
+            os.remove(abs_sum)
+        os.rmdir(ext)
 
 
 def test_write_outputs_csv_includes_chars_and_error(tmp_path):

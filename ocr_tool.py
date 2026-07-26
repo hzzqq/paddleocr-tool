@@ -111,6 +111,12 @@ def parse_args(argv=None):
                         help="跳过超过该体积（字节）的文件（0 表示不限制），避免超大扫描件/图片拖垮内存或后端")
     parser.add_argument("--backend", choices=["paddle", "tesseract"],
                         default="paddle", help="OCR 后端，默认 paddle")
+    parser.add_argument("--no-angle", dest="use_angle_cls", action="store_false",
+                        default=True,
+                        help="R1 新能力：关闭文字方向分类（旋转校正），对纯水平排版可省去角度模型加载、提速；"
+                             "默认开启（--angle 与此等价，显式强调）")
+    parser.add_argument("--angle", dest="use_angle_cls", action="store_true",
+                        help="R1 新能力：显式开启文字方向分类（默认即开启，此标志用于覆盖前文的 --no-angle）")
     parser.add_argument("--mock", action="store_true",
                         help="使用 mock 模式返回假文本（无需任何 OCR 依赖，用于演示流程）")
     parser.add_argument("--dry-run", action="store_true",
@@ -154,6 +160,9 @@ def parse_args(argv=None):
     parser.add_argument("--report", default=None,
                         help="R1 新能力：把运行报告（各状态计数 + 各状态文件清单 + 建议重跑清单）"
                              "以 JSON 写入该路径，便于流水线/人工快速定位需重跑的文件")
+    parser.add_argument("--summary-file", default=None,
+                        help="R1 新能力：自定义汇总文件名（默认 summary.txt）；可为相对 output 的子路径或绝对路径，"
+                             "父目录不存在时自动创建")
     parser.add_argument("--log-level", default="INFO",
                         help="R1 新能力：日志级别 DEBUG/INFO/WARNING/ERROR（诊断信息写 stderr，不污染 stdout 结果）")
     parser.add_argument("--log-file", default=None,
@@ -471,26 +480,33 @@ def pdf_to_images(pdf_path):
 
 # PaddleOCR 识别器懒加载单例：避免每张图都重建（原实现每图 new 一次，
 # 多图/并行时是明显性能悬崖），并用锁保证多线程下复用安全。
-# 单例按 lang 维度缓存：切换语言时自动重建，避免用错语言的识别器（隐性正确性 bug）。
+# 单例按 (lang, use_angle_cls) 维度缓存：切换语言或角度分类开关时自动重建，
+# 避免用错语言的识别器（隐性正确性 bug），也避免 --no-angle 切换后复用旧实例。
 _paddle_lock = threading.Lock()
 _paddle_recognizer = None
 _paddle_recognizer_lang = None
+_paddle_recognizer_angle = None
 
 
-def recognize_paddle(recognizer_cls, image_input, lang, min_conf=0.0):
+def recognize_paddle(recognizer_cls, image_input, lang, min_conf=0.0, use_angle_cls=True):
     """用 PaddleOCR 识别单张图片（image_input 可为路径或 PIL.Image）。
 
     recognizer_cls：PaddleOCR 类（由 build_recognizer 传入）。
     内部以「懒加载单例 + 锁」复用同一个识别器实例，既消除逐图重建的
     性能悬崖，又用锁保证 ThreadPoolExecutor 并行时不会并发踩同一实例。
-    当 lang 变化时会自动重建单例，否则复用（正确性 + 性能双重保证）。
+    当 lang 或 use_angle_cls 变化时会自动重建单例，否则复用（正确性 + 性能双重保证）。
     min_conf：最低置信度阈值（0~1），低于该值的识别行将被丢弃（仅 paddle 生效）。
+    use_angle_cls：是否启用文字方向分类（旋转校正），默认 True；对纯水平排版可关掉提速。
     """
-    global _paddle_recognizer, _paddle_recognizer_lang
+    global _paddle_recognizer, _paddle_recognizer_lang, _paddle_recognizer_angle
     with _paddle_lock:
-        if _paddle_recognizer is None or _paddle_recognizer_lang != lang:
-            _paddle_recognizer = recognizer_cls(use_angle_cls=True, lang=lang)
+        if (_paddle_recognizer is None
+                or _paddle_recognizer_lang != lang
+                or _paddle_recognizer_angle != use_angle_cls):  # R2 修复（隐性缺陷）：单例缓存键缺失 use_angle_cls，
+                                                               # --no-angle 切换后被旧 True 实例覆盖而「不生效」
+            _paddle_recognizer = recognizer_cls(use_angle_cls=use_angle_cls, lang=lang)
             _paddle_recognizer_lang = lang
+            _paddle_recognizer_angle = use_angle_cls
         ocr = _paddle_recognizer
 
     if hasattr(image_input, "save"):  # PIL.Image（来自 PDF 转图）
@@ -501,7 +517,7 @@ def recognize_paddle(recognizer_cls, image_input, lang, min_conf=0.0):
     else:
         img_path = str(image_input)
     try:
-        result = ocr.ocr(img_path, cls=True)
+        result = ocr.ocr(img_path, cls=use_angle_cls)
     finally:
         if hasattr(image_input, "save"):
             try:
@@ -674,7 +690,7 @@ def build_recognizer(args):
             print("[降级] 程序不会崩溃，请按提示安装后重试；或使用 --backend tesseract 或 --mock。")
             raise
         plang = resolve_lang(args.lang, "paddle")
-        return (lambda img: recognize_paddle(cls, img, plang, args.min_conf), "paddle")
+        return (lambda img: recognize_paddle(cls, img, plang, args.min_conf, args.use_angle_cls), "paddle")
 
     if args.backend == "tesseract":
         try:
@@ -989,13 +1005,15 @@ def write_combined(results, output_dir, fmt, status_filter=None):
     return path
 
 
-def write_outputs(results, output_dir, fmt, combine=False, status_filter=None):
+def write_outputs(results, output_dir, fmt, combine=False, status_filter=None, summary_name="summary.txt"):
     """根据格式写出结果文件。combine=True 时额外写出合并文件。
 
     status_filter：可选状态集合（str 列表，如 ["ok"]）；仅这些状态的结果
     会写出逐文件产物（md/txt/jsonl）与合并文件，便于「只导出成功结果 / 把
     empty·filtered·error 留待重跑」。results.json / results.csv / summary.txt /
     stats.json 始终写入全量结果，保证审计信息不被筛选影响。
+    summary_name：汇总文件名（R1 新能力 --summary-file），可为相对 output 的
+    子路径或绝对路径；父目录不存在时自动创建（R2 边界加固）。
     """
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -1031,8 +1049,14 @@ def write_outputs(results, output_dir, fmt, combine=False, status_filter=None):
                 f.write(json.dumps(r, ensure_ascii=False) + "\n")
         print(f"[完成] 已写出：{jsonl_path}")
 
-    # 始终写出人类可读的汇总（新产物：一眼看清本次跑批结果）
-    summary_path = output_dir / "summary.txt"
+    # 始终写出人类可读的汇总（R1 新能力：--summary-file 可自定义名称/路径）
+    # R2 边界：summary_name 为绝对路径时直接用，否则相对 output_dir；
+    # 父目录不存在时自动创建，避免「汇总写不出去」的隐性崩溃。
+    sname = summary_name or "summary.txt"
+    summary_path = Path(sname)
+    if not summary_path.is_absolute():
+        summary_path = output_dir / sname
+    summary_path.parent.mkdir(parents=True, exist_ok=True)
     s = summarize_statuses(results)
     ok = s["ok"]
     skipped = s["skipped_pdf"]
@@ -1288,7 +1312,7 @@ def main(argv=None):
         # 仍创建输出目录，避免下游报错（dry-run 无 --output 时跳过）
         if args.output:
             Path(args.output).mkdir(parents=True, exist_ok=True)
-            write_outputs([], args.output, args.format)
+            write_outputs([], args.output, args.format, summary_name=args.summary_file)
         return 0
 
     # 断点续跑：跳过已有结果的文件（避免重复 OCR 浪费）
@@ -1379,7 +1403,8 @@ def main(argv=None):
             status_filter = None
         else:
             print(f"[提示] 仅写出状态为 {','.join(status_filter)} 的逐文件/合并产物（审计文件仍含全部结果）")
-    write_outputs(results, args.output, args.format, combine=args.combine, status_filter=status_filter)
+    write_outputs(results, args.output, args.format, combine=args.combine,
+                  status_filter=status_filter, summary_name=args.summary_file)
     # R1 新能力：写出机器可读运行报告（含各状态文件清单 + 建议重跑清单），
     # 弥补 summary 只给计数、不给具体文件的隐性可观测性缺口。
     if args.report:

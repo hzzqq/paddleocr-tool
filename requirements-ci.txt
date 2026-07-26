@@ -1,0 +1,3 @@
+# 最小化 CI 测试依赖（仅运行 pytest 套件所需）
+# ocr_tool / log_utils 仅依赖标准库；重型 OCR 后端按需懒加载，测试走 mock。
+pytest>=8.0

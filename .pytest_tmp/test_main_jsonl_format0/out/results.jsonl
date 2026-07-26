@@ -1,0 +1,1 @@
+{"file": "E:\\project\\project2\\mirrors\\paddleocr-tool\\.pytest_tmp\\test_main_jsonl_format0\\a.png", "text": "[MOCK] 这是 a.png 的模拟识别文本（语言=ch）。\n欢迎使用 PaddleOCR 批量图文抽取工具。", "chars": 56, "elapsed": 0.0, "status": "ok", "error": "", "avg_conf": null, "min_conf": null}

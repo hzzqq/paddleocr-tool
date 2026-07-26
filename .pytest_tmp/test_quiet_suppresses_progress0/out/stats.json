@@ -1,0 +1,13 @@
+{
+  "total": 1,
+  "ok": 1,
+  "empty": 0,
+  "filtered": 0,
+  "skipped_pdf": 0,
+  "error": 0,
+  "total_chars": 56,
+  "total_time": 0.0,
+  "avg_conf_overall": null,
+  "format": "md",
+  "generated_at": "2026-07-25 02:11:11"
+}

@@ -1,0 +1,4 @@
+## a.png
+
+[MOCK] 这是 a.png 的模拟识别文本（语言=ch）。
+欢迎使用 PaddleOCR 批量图文抽取工具。

@@ -1,0 +1,20 @@
+{
+  "counts": {
+    "total": 2,
+    "ok": 0,
+    "empty": 0,
+    "filtered": 2,
+    "error": 0,
+    "skipped_pdf": 0
+  },
+  "by_status": {
+    "filtered": [
+      "E:\\project\\project2\\mirrors\\paddleocr-tool\\.pytest_tmp\\test_main_report_writes_json0\\a.png",
+      "E:\\project\\project2\\mirrors\\paddleocr-tool\\.pytest_tmp\\test_main_report_writes_json0\\b.png"
+    ]
+  },
+  "rerun_candidates": [
+    "E:\\project\\project2\\mirrors\\paddleocr-tool\\.pytest_tmp\\test_main_report_writes_json0\\a.png",
+    "E:\\project\\project2\\mirrors\\paddleocr-tool\\.pytest_tmp\\test_main_report_writes_json0\\b.png"
+  ]
+}

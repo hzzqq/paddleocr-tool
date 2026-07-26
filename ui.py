@@ -33,6 +33,7 @@ with st.sidebar:
     fmt = st.selectbox("输出格式", ["md", "json", "csv", "txt"])
     recursive = st.checkbox("递归遍历子目录", value=False)
     backend = st.selectbox("OCR 后端", ["paddle", "tesseract"])
+    use_angle = st.checkbox("文字方向分类（--no-angle 取消；纯水平排版关掉可提速）", value=True)
     workers = st.number_input("并行线程数", min_value=1, max_value=8, value=1, step=1)
     min_conf = st.slider("最低置信度（仅 paddle 生效）", 0.0, 1.0, 0.0, 0.05)
     include = st.text_input("文件名过滤（--include，可选）", placeholder="如 *page* 或 封面")
@@ -52,6 +53,8 @@ if start:
     # 用户会误以为已过滤。这里在运行前显式告警，避免「静默失效」的误导。
     if backend != "paddle" and min_conf > 0:
         st.warning("⚠️ 最低置信度仅在 paddle 后端生效；当前选择 tesseract，该选项不会生效。")
+    if backend != "paddle" and not use_angle:
+        st.warning("⚠️ 文字方向分类（--no-angle）仅 paddle 后端生效；当前选择 tesseract，该选项不会生效。")
     if not input_dir or not output_dir:
         st.error("请先填写输入目录与输出目录。")
     elif not Path(input_dir).exists():
@@ -88,6 +91,8 @@ if start:
             cmd.append("--normalize")
         if dedup_lines:
             cmd.append("--dedup-lines")
+        if not use_angle:
+            cmd.append("--no-angle")
 
         log_box = st.empty()
         progress = st.progress(0, text="准备中…")

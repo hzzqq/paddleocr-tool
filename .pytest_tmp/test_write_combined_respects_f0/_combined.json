@@ -1,0 +1,18 @@
+[
+  {
+    "file": "a.png",
+    "text": "甲",
+    "chars": 1,
+    "elapsed": 0.1,
+    "status": "ok",
+    "error": ""
+  },
+  {
+    "file": "b.png",
+    "text": "乙",
+    "chars": 1,
+    "elapsed": 0.1,
+    "status": "ok",
+    "error": ""
+  }
+]
