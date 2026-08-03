@@ -183,3 +183,10 @@ if start:
                                 data=fh.read(),
                                 file_name=f.name,
                             )
+
+
+if __name__ == "__main__":
+    import sys
+    from streamlit.web.cli import main as _st_main
+    sys.argv = ["streamlit", "run", __file__, "--server.port", "8502"]
+    _st_main()

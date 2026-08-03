@@ -553,6 +553,64 @@ def test_main_skip_existing(tmp_path, capsys):
     assert (out / "results.json").exists()
 
 
+def test_main_skip_existing_resume_recognizes_new_file(tmp_path, capsys):
+    """R2 回归：目录新增文件在已有 results.json 时，--skip-existing 仍应识别它。
+
+    旧实现：done_paths 对汇总格式一律返回「results.json 是否存在」，等于
+    「只要跑过一次，之后任何文件都算已完成」——新加入目录的文件永远不会被
+    识别，中断后续跑原地空转，与断点续跑承诺完全相反。
+    """
+    for n in ("a", "b", "c"):
+        (tmp_path / f"{n}.png").write_bytes(b"fake")
+    out = tmp_path / "out"
+    rc1 = ocr_tool.main(["--input", str(tmp_path), "--output", str(out), "--mock"])
+    assert rc1 == 0
+    assert (out / "results.json").exists()
+    # 新增 d.png 后带 --skip-existing 续跑
+    (tmp_path / "d.png").write_bytes(b"fake")
+    rc2 = ocr_tool.main([
+        "--input", str(tmp_path), "--output", str(out), "--mock", "--skip-existing",
+    ])
+    assert rc2 == 0
+    # 新增文件必须被实际处理并产出（旧实现下 d.md 永远不会生成）
+    assert (out / "d.md").exists()
+    out_text = capsys.readouterr().out
+    assert "跳过" in out_text  # 旧的 a/b/c 被正确跳过
+
+
+def test_main_skip_existing_resume_preserves_history(tmp_path):
+    """R2 回归：--skip-existing 续跑后 results.json 仍含历史全部文件记录。
+
+    旧实现：write_outputs 整体重写 results.json，仅写本轮新处理的文件，
+    把之前已识别的 a/b/c 记录静默抹掉（「断点续跑」反把已得成果删了）。
+    """
+    for n in ("a", "b", "c"):
+        (tmp_path / f"{n}.png").write_bytes(b"fake")
+    out = tmp_path / "out"
+    ocr_tool.main(["--input", str(tmp_path), "--output", str(out), "--mock"])
+    (tmp_path / "d.png").write_bytes(b"fake")
+    ocr_tool.main([
+        "--input", str(tmp_path), "--output", str(out), "--mock", "--skip-existing",
+    ])
+    data = json.loads((out / "results.json").read_text(encoding="utf-8"))
+    files = sorted(os.path.basename(r["file"]) for r in data)
+    assert files == ["a.png", "b.png", "c.png", "d.png"]
+
+
+def test_merge_previous_results_unit():
+    """merge_previous_results：本轮结果按路径覆盖旧记录，其余旧记录保留。"""
+    prev = [
+        {"file": "a.png", "status": "ok", "text": "old-a"},
+        {"file": "b.png", "status": "ok", "text": "old-b"},
+    ]
+    curr = [{"file": "b.png", "status": "ok", "text": "new-b"}]
+    merged = ocr_tool.merge_previous_results(prev, curr)
+    by_file = {os.path.normcase(r["file"]): r for r in merged}
+    assert len(merged) == 2
+    assert by_file["a.png"]["text"] == "old-a"
+    assert by_file["b.png"]["text"] == "new-b"
+
+
 def test_process_file_aggregates_confidence(tmp_path):
     """R1 新需求验证：识别器返回 (text, confs)，process_file 聚合 avg/min 置信度。"""
     from pathlib import Path as _P

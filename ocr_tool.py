@@ -1158,16 +1158,72 @@ def write_outputs(results, output_dir, fmt, combine=False, status_filter=None, s
         print(f"[完成] 已写出逐文件 .md 到：{output_dir}")
 
 
-def _output_exists(output_dir, file_path, fmt):
+def load_previous_results(output_dir) -> list:
+    """读取上一轮写出的 results.json（--skip-existing 续跑用）。
+
+    文件不存在 / 内容损坏 / 结构不是列表时一律返回空列表，绝不让续跑因为
+    一个坏掉的审计文件而崩溃。
+    """
+    path = Path(output_dir) / "results.json"
+    if not path.exists():
+        return []
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return []
+    if not isinstance(data, list):
+        return []
+    return [r for r in data if isinstance(r, dict) and r.get("file")]
+
+
+def done_paths(previous: list) -> set:
+    """从既有结果里取出「确实已处理完成」的文件路径集合。
+
+    error 状态视为未完成，续跑时应当重试；其余终态（ok/empty/filtered/
+    skipped_pdf）视为已完成。路径按 os.path.normcase 归一，规避 Windows 上
+    大小写写法差异导致的重复处理。
+    """
+    out = set()
+    for r in previous:
+        if r.get("status") == "error":
+            continue
+        out.add(os.path.normcase(str(r.get("file"))))
+    return out
+
+
+def _output_exists(output_dir, file_path, fmt, done=None):
     """判断某文件的识别结果是否已存在（用于 --skip-existing 续跑）。
 
-    md/txt 看对应逐文件产物；json/csv 以整批 results.json 作为完成标记。
+    md/txt 看对应逐文件产物；json/jsonl/csv 这类「整批汇总」格式没有逐文件
+    产物，必须查 results.json 里是否真的记录过这个文件。
+
+    R2 修复（真实数据缺口）：旧实现对汇总格式一律返回「results.json 是否存在」，
+    等于「只要跑过一次，之后任何文件都算已完成」——新加入目录的文件永远不会被
+    识别，中断后续跑也原地空转，与 --skip-existing 承诺的「断点续跑 / 增量重试」
+    完全相反，而且用户收不到任何警告。
     """
     out = Path(output_dir)
     stem = Path(file_path).stem
     if fmt in ("md", "txt"):
         return (out / f"{stem}.{fmt}").exists()
-    return (out / "results.json").exists()
+    if done is None:
+        done = done_paths(load_previous_results(output_dir))
+    return os.path.normcase(str(file_path)) in done
+
+
+def merge_previous_results(previous: list, results: list) -> list:
+    """把本轮结果并回既有 results.json 内容（--skip-existing 续跑用）。
+
+    R2 修复（真实数据丢失）：续跑时 write_outputs 会整体重写 results.json，
+    如果只写本轮新处理的文件，之前几百个文件的识别记录就被静默抹掉——
+    「断点续跑」反而把已有成果删了。这里以本轮结果覆盖同路径的旧记录，
+    其余旧记录保留，保证审计文件始终是全量视图。
+    """
+    fresh = {os.path.normcase(str(r.get("file"))): r for r in results}
+    merged = [r for r in previous
+              if os.path.normcase(str(r.get("file"))) not in fresh]
+    merged.extend(results)
+    return merged
 
 
 def apply_min_chars(results, min_chars: int) -> list:
@@ -1370,10 +1426,15 @@ def main(argv=None):
         return 0
 
     # 断点续跑：跳过已有结果的文件（避免重复 OCR 浪费）
+    # previous 同时用于两件事：判断哪些文件真的已完成；以及在写出时把本轮结果
+    # 并回既有 results.json，避免续跑把之前的识别记录整体覆盖丢失。
+    previous: list = []
     if args.skip_existing:
+        previous = load_previous_results(args.output) if args.output and not stdout_mode else []
+        done = done_paths(previous)
         kept, already = [], []
         for f in files:
-            if _output_exists(args.output, f, args.format):
+            if _output_exists(args.output, f, args.format, done):
                 already.append(f)
             else:
                 kept.append(f)
@@ -1469,7 +1530,15 @@ def main(argv=None):
             print(f"[失败] 有 {errored} 个文件识别失败，因 --fail-on-error 退出码置为 1。", file=sys.stderr)
             return 1
         return 0
-    write_outputs(results, args.output, args.format, combine=args.combine,
+    # R2 修复（真实数据丢失）：--skip-existing 续跑时，本轮只重新处理了
+    # 新增/失败重跑的文件，若直接把 results 整体写出，之前几百个已识别文件的
+    # 记录会被静默抹掉（「断点续跑」反把已得成果删了）。因此把本轮结果并回
+    # 既有 results.json 内容，审计类产物（results.json/csv/summary/stats）才
+    # 能始终是全量视图。逐文件 md/txt 重写是幂等的（内容一致），无副作用。
+    _write_results = results
+    if args.skip_existing and previous and not stdout_mode:
+        _write_results = merge_previous_results(previous, results)
+    write_outputs(_write_results, args.output, args.format, combine=args.combine,
                   status_filter=status_filter, summary_name=args.summary_file)
     # R1 新能力：写出机器可读运行报告（含各状态文件清单 + 建议重跑清单），
     # 弥补 summary 只给计数、不给具体文件的隐性可观测性缺口。
