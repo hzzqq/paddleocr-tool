@@ -1687,3 +1687,79 @@ def test_main_output_dash_pipes_jsonl(tmp_path, capsys):
     # 确认 cwd 没有被创建字面量 "-" 目录（R2 隐性 bug 修复）
     assert not os.path.exists("-")
 
+
+
+def test_recognize_with_retry_negative_retries_clamped():
+    """R2 修复验证：--retries 负数不得把整批静默打成 error。
+
+    修复前 range(-1+1) 为空循环、raise last_exc 变成 raise None 抛 TypeError，
+    被上层捕获后每个文件都标 error；现钳制为 max(0, retries)。
+    """
+    calls = {"n": 0}
+
+    def _always_fail(img):
+        calls["n"] += 1
+        raise ValueError("boom")
+
+    with pytest.raises(ValueError):  # 修复前：TypeError（raise None）
+        ocr_tool._recognize_with_retry(_always_fail, "x.png", -1)
+    assert calls["n"] == 1  # 负数钳制为 0：仅尝试一次，不无限重试
+
+
+def test_recognize_with_retry_positive_attempts():
+    calls = {"n": 0}
+
+    def _fail_twice(img):
+        calls["n"] += 1
+        if calls["n"] < 3:
+            raise RuntimeError("transient")
+        return "ok"
+
+    assert ocr_tool._recognize_with_retry(_fail_twice, "x.png", 2) == "ok"
+    assert calls["n"] == 3
+
+
+class _LockSpyOCR:
+    def __init__(self, use_angle_cls=True, lang="ch"):
+        pass
+
+    def ocr(self, img_path, cls=True):
+        # 推理期间必须持有 _paddle_lock：--workers>1 时 Paddle 预测器非线程安全
+        assert ocr_tool._paddle_lock.locked(), \
+            "ocr.ocr() 调用未持锁：并行下会并发踩同一 Paddle 实例"
+        return [[_make_line("并发安全", 0.9)]]
+
+
+def test_recognize_paddle_holds_lock_during_inference():
+    ocr_tool._paddle_recognizer = None
+    try:
+        txt, conf = ocr_tool.recognize_paddle(_LockSpyOCR, "x.png", "ch", min_conf=0.0)
+        assert txt == "并发安全"
+        assert conf == [0.9]
+    finally:
+        ocr_tool._paddle_recognizer = None
+
+
+def test_skip_existing_same_stem_not_falsely_done(tmp_path):
+    """R2 修复验证：--skip-existing 下同名 stem（a/x.png、b/x.png）不得仅凭
+    x.md 存在就把从未处理过的 b/x.png 误判已完成（静默永久漏跑）。"""
+    out = tmp_path / "out"
+    out.mkdir()
+    (out / "x.md").write_text("from a/x.png", encoding="utf-8")
+    results = [{"file": str(tmp_path / "in" / "a" / "x.png"), "status": "ok"}]
+    (out / "results.json").write_text(
+        json.dumps(results, ensure_ascii=False), encoding="utf-8")
+    done = ocr_tool.done_paths(ocr_tool.load_previous_results(out))
+    assert ocr_tool._output_exists(out, tmp_path / "in" / "a" / "x.png", "md", done) is True
+    assert ocr_tool._output_exists(out, tmp_path / "in" / "b" / "x.png", "md", done) is False
+    # 产物被用户删掉 -> 即便记录在案也应重跑
+    (out / "x.md").unlink()
+    assert ocr_tool._output_exists(out, tmp_path / "in" / "a" / "x.png", "md", done) is False
+
+
+def test_skip_existing_without_state_falls_back_to_stem(tmp_path):
+    """无 results.json（老用户升级场景）时保持旧行为：仅看 stem 产物存在。"""
+    out = tmp_path / "out2"
+    out.mkdir()
+    (out / "x.md").write_text("legacy", encoding="utf-8")
+    assert ocr_tool._output_exists(out, tmp_path / "anywhere" / "x.png", "md", done=set()) is True

@@ -521,7 +521,12 @@ def recognize_paddle(recognizer_cls, image_input, lang, min_conf=0.0, use_angle_
     else:
         img_path = str(image_input)
     try:
-        result = ocr.ocr(img_path, cls=use_angle_cls)
+        # R2 修复（并发安全）：锁必须覆盖 ocr.ocr() 调用本身。原实现只在
+        # 构建/选择单例时持锁，--workers>1 时多线程会同时调用同一 Paddle
+        # 预测器实例（其非线程安全），可能乱序输出甚至崩溃。PaddleOCR 推理
+        # 是真正的临界区，与单例选择共用同一把锁串行化。
+        with _paddle_lock:
+            result = ocr.ocr(img_path, cls=use_angle_cls)
     finally:
         if hasattr(image_input, "save"):
             try:
@@ -711,7 +716,13 @@ def _recognize_with_retry(recognizer, image_input, retries: int):
 
     R1 新能力：单页/单图识别偶发失败（内存抖动、后端瞬时异常）时自动重试，
     提升批处理对瞬时错误的韧性，避免一次抖动就丢掉整份结果。
+
+    R2 修复（输入校验缺失）：retries 为负数（如 `--retries -1`）时
+    `range(retries + 1)` 为空循环，末尾 `raise last_exc` 变成 `raise None`
+    抛 TypeError，被上层捕获后每个文件都标成 error——合法外观的输入静默
+    毁掉整批结果。现钳制为 max(0, retries)。
     """
+    retries = max(0, int(retries))
     last_exc = None
     for attempt in range(retries + 1):
         try:
@@ -1201,11 +1212,26 @@ def _output_exists(output_dir, file_path, fmt, done=None):
     等于「只要跑过一次，之后任何文件都算已完成」——新加入目录的文件永远不会被
     识别，中断后续跑也原地空转，与 --skip-existing 承诺的「断点续跑 / 增量重试」
     完全相反，而且用户收不到任何警告。
+
+    R2 修复（同名 stem 误判，静默漏跑）：md/txt 原实现只看 `{stem}.{fmt}`
+    是否存在。但写出端 _unique_path 在冲突时会改名（b/x.png -> x_2.md），
+    导致「目录里有 x.md」不代表「这个 x.png 处理过」：--recursive 下
+    a/x.png 与 b/x.png 同名，仅凭 stem 会把从未处理过的 b/x.png 永久误判
+    已完成、静默跳过。现规则：①无 results.json（无状态可查）时保持旧行为
+    仅看产物存在；②有状态文件时必须「stem 产物存在 且 源文件确实记录在
+    results.json」双重确认，二者其一不满足都视为未完成。
     """
     out = Path(output_dir)
     stem = Path(file_path).stem
     if fmt in ("md", "txt"):
-        return (out / f"{stem}.{fmt}").exists()
+        stem_done = (out / f"{stem}.{fmt}").exists()
+        if done is None or not (out / "results.json").exists():
+            # 无状态文件：退回旧行为（只看逐文件产物），避免老用户升级后
+            # results.json 已丢失时整批被重跑、产物互相 _2 后缀堆积。
+            return stem_done
+        if not stem_done:
+            return False
+        return os.path.normcase(str(file_path)) in done
     if done is None:
         done = done_paths(load_previous_results(output_dir))
     return os.path.normcase(str(file_path)) in done
