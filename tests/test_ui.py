@@ -64,3 +64,18 @@ def test_ui_counts_empty_and_filtered():
     assert '"empty"' in UI_SRC and '"filtered"' in UI_SRC  # 徽章映射含两类状态
     # 六类指标（成功/跳过/失败/空结果/已过滤/总计）
     assert 'c1, c2, c3, c4, c5, c6' in UI_SRC
+
+
+def test_ui_redact_uses_newline_separator():
+    """R2 修复（c166）：脱敏正则必须按换行分隔——正则自身常含逗号
+    （\d{1,3}、{2,}），旧逗号分隔会把合法正则撕成非法片段，脱敏静默失效。"""
+    assert "redact_patterns.splitlines()" in UI_SRC
+    assert 'redact_patterns.split(",")' not in UI_SRC
+
+
+def test_ui_popen_utf8_and_running_guard():
+    """R2 修复（c166）：子进程统一 UTF-8 解码（Windows 默认 GBK 会因 ✅/
+    emoji 文件名卡死进度）；运行态守卫防重复排队。"""
+    assert 'encoding="utf-8", errors="replace"' in UI_SRC
+    assert "_ocr_running" in UI_SRC
+    assert 'st.session_state.get("_ocr_running")' in UI_SRC

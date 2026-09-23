@@ -45,11 +45,17 @@ with st.sidebar:
     exclude = st.text_input("排除文件（--exclude，可选）", placeholder="如 *tmp* 或 草稿")
     normalize = st.checkbox("规整空白（--normalize，折叠换行/去首尾空白）", value=False)
     dedup_lines = st.checkbox("删除连续重复行（--dedup-lines，去页眉水印）", value=False)
-    redact_patterns = st.text_input("隐私脱敏正则（--redact-pattern，逗号分隔，可选）", placeholder="如 \\d{17}[\\dX],1[3-9]\\d{9}")
+    redact_patterns = st.text_input("隐私脱敏正则（--redact-pattern，换行分隔，可选）", placeholder="每行一个正则，如\n\\d{17}[\\dX]\n1[3-9]\\d{9}")
 
     start = st.button("开始识别", type="primary")
 
 if start:
+    # R2 修复（c166）：防止「运行中重复点击」排队第二次完整 OCR（同输出目录
+    # 重复处理、_unique_path 竞态）。用 session_state 标记运行态；完成后清除。
+    if st.session_state.get("_ocr_running"):
+        st.warning("⚠️ 已有识别任务在运行，请等待完成后再点击。")
+        st.stop()
+    st.session_state["_ocr_running"] = True
     # 隐性问题：最低置信度仅 paddle 后端生效，但 UI 允许在 tesseract 下设置，
     # 用户会误以为已过滤。这里在运行前显式告警，避免「静默失效」的误导。
     if backend != "paddle" and min_conf > 0:
@@ -93,7 +99,12 @@ if start:
         if dedup_lines:
             cmd.append("--dedup-lines")
         if redact_patterns:
-            for pat in [p.strip() for p in redact_patterns.split(",") if p.strip()]:
+            # R2 修复（c166）：正则本身可能含逗号（\d{1,3}、{2,}），原实现
+            # 按 split(",") 切割会把 \d{1,3} 拆成 \d{1 与 3} 两段非法正则；
+            # redact_text 编译失败仅 log.warning，脱敏静默失效——结果仍含
+            # 完整身份证/手机号。改用换行作为分隔符（一行一个正则），与正则
+            # 语法不冲突；placeholder 示例相应更新。
+            for pat in [p.strip() for p in redact_patterns.splitlines() if p.strip()]:
                 cmd += ["--redact-pattern", pat]
         if not use_angle:
             cmd.append("--no-angle")
@@ -105,6 +116,9 @@ if start:
         proc = subprocess.Popen(
             cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
             text=True, bufsize=1,
+            # R2 修复（c166）：Windows 默认 GBK；子进程输出含 ✅ 或 emoji 文件名时
+            # 编码不一致会抛 UnicodeDecodeError 卡死进度。统一 UTF-8 + errors=replace。
+            encoding="utf-8", errors="replace",
         )
         total = 0
         done = 0
@@ -183,6 +197,9 @@ if start:
                                 data=fh.read(),
                                 file_name=f.name,
                             )
+
+    # R2 修复（c166）：无论成功/失败都清除运行态标记，允许下一次识别
+    st.session_state["_ocr_running"] = False
 
 
 if __name__ == "__main__":
