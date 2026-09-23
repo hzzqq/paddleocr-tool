@@ -839,22 +839,34 @@ def process_file(file_path, recognizer, backend_name, retries: int = 0, normaliz
     }
 
 
-def _unique_path(output_dir, name: str):
+def _unique_path(output_dir, name: str, used: "set | None" = None):
     """返回 output_dir 下不冲突的命名路径（R1 新能力 + R2 修复）。
 
     原实现直接用 stem + 扩展名，当不同子目录存在同名文件
     （如 a/x.png 与 b/x.png）时，二者都写 x.md，后者静默覆盖前者，
     造成结果丢失且无任何提示。这里在冲突时追加 _2 / _3 … 后缀，
     保证每个输入文件都有独立、不互相覆盖的输出。
+
+    R2 修复（c168，续跑重写不幂等）：新增 used 语义——write_outputs 在
+    本轮内共享同一个 used 集合：
+      - 目标路径本轮已用过（真正的同名 stem 冲突）-> 顺延 _N；
+      - 目标文件已存在但并非本轮写出（--skip-existing 续跑的历史产物）
+        -> 直接覆盖，保持重写幂等（原行为是每轮 _2/_3/_N 无限增生，
+        磁盘持续膨胀且与「重写幂等」注释相反）；
+      - 目标不存在 -> 直接用。
+    used=None 时保持旧行为（存在即顺延），兼容既有调用与单测。
     """
     out = Path(output_dir) / name
-    if not out.exists():
-        return out
     stem, ext = out.stem, out.suffix
-    i = 2
+    # 候选序列：原名 -> _2 -> _3 ...（与历史行为一致，从 _2 开始顺延）
+    i = 0
     while True:
-        cand = Path(output_dir) / f"{stem}_{i}{ext}"
-        if not cand.exists():
+        cand = out if i == 0 else Path(output_dir) / f"{stem}_{i + 1}{ext}"
+        if used is not None:
+            if cand not in used:
+                used.add(cand)
+                return cand
+        elif not cand.exists():
             return cand
         i += 1
 
@@ -968,26 +980,26 @@ def merge_results_text(results, include_statuses=("ok",),
     return "\n\n".join(blocks)
 
 
-def write_markdown(result, output_dir):
-    """写入单个文件的 .md 结果。"""
+def write_markdown(result, output_dir, used: "set | None" = None):
+    """写入单个文件的 .md 结果。used：本轮已写出路径集合（幂等重写，见 _unique_path）。"""
     src = Path(result["file"])
-    out_path = _unique_path(output_dir, src.stem + ".md")
-    meta = f"耗时：{result['elapsed']}s　状态：{result['status']}　字符数：{result['chars']}"
+    out_path = _unique_path(output_dir, src.stem + ".md", used)
+    meta = f"耗时：{result.get('elapsed', 0)}s　状态：{result.get('status', '')}　字符数：{result.get('chars', 0)}"
     if result.get("avg_conf") is not None:
         meta += f"　平均置信度：{result['avg_conf']}"
     if result.get("error"):
         meta += f"\n> 错误：{result['error']}"
     header = f"# {src.name}\n\n> {meta}\n\n"
-    body = result["text"] if result["text"] else "（无识别结果）"
+    body = result.get("text") or "（无识别结果）"
     out_path.write_text(header + body + "\n", encoding="utf-8")
     return out_path
 
 
-def write_text(result, output_dir):
+def write_text(result, output_dir, used: "set | None" = None):
     """写入单个文件的 .txt 纯文本结果（--format txt）。"""
     src = Path(result["file"])
-    out_path = _unique_path(output_dir, src.stem + ".txt")
-    out_path.write_text(result["text"] + "\n", encoding="utf-8")
+    out_path = _unique_path(output_dir, src.stem + ".txt", used)
+    out_path.write_text((result.get("text") or "") + "\n", encoding="utf-8")
     return out_path
 
 
@@ -1086,19 +1098,27 @@ def write_outputs(results, output_dir, fmt, combine=False, status_filter=None, s
     with open(csv_path, "w", encoding="utf-8-sig", newline="") as f:
         writer = csv.DictWriter(
             f, fieldnames=["file", "text", "chars", "elapsed", "status",
-                           "error", "avg_conf", "min_conf", "redact_count"]
+                           "error", "avg_conf", "min_conf", "redact_count"],
+            # R2 修复（c168）：load_previous_results 只保证 file 键——旧版本/
+            # 手工编辑的 results.json 可能缺字段（restval 兜底）或多出未知键
+            # （extrasaction=raise 会 ValueError 裸崩）。统一宽容化。
+            restval="", extrasaction="ignore",
         )
         writer.writeheader()
         for r in results:
             writer.writerow(r)
 
     # 按用户指定格式写出逐文件结果（受 status_filter 约束）
+    # R2 修复（c168）：本轮共享 used 集合——--skip-existing 续跑重写历史产物
+    # 时直接覆盖（幂等），仅真正的同名 stem 冲突才顺延 _N；原先每轮重写都
+    # 经 _unique_path 顺延，产物每轮增生 _2/_3/_N，磁盘持续膨胀。
+    used_paths: set = set()
     if fmt == "md":
         for r in per_file_results:
-            write_markdown(r, output_dir)
+            write_markdown(r, output_dir, used_paths)
     elif fmt == "txt":
         for r in per_file_results:
-            write_text(r, output_dir)
+            write_text(r, output_dir, used_paths)
     elif fmt == "jsonl":
         # 每行一条 JSON，便于 grep/awk/jq 等行式工具与流式消费
         jsonl_path = output_dir / "results.jsonl"
@@ -1119,8 +1139,8 @@ def write_outputs(results, output_dir, fmt, combine=False, status_filter=None, s
     ok = s["ok"]
     skipped = s["skipped_pdf"]
     errored = s["error"]
-    total_chars = sum(len(r["text"]) for r in results)
-    total_time = round(sum(r["elapsed"] for r in results), 3)
+    total_chars = sum(len(r.get("text") or "") for r in results)
+    total_time = round(sum(r.get("elapsed") or 0 for r in results), 3)
     summary_lines = [
         "PaddleOCR 批量图文抽取 · 运行汇总",
         f"时间：{time.strftime('%Y-%m-%d %H:%M:%S')}",
@@ -1570,7 +1590,12 @@ def main(argv=None):
     # 弥补 summary 只给计数、不给具体文件的隐性可观测性缺口。
     if args.report:
         report = build_run_report(results)
-        Path(args.report).write_text(
+        # R2 修复（c168）：--report 父目录不存在时自动创建。原实现裸抛
+        # FileNotFoundError——全部 OCR 完成后才在写报告阶段崩溃、退出码非 0，
+        # CI 会误判整批识别失败（summary 路径早有 mkdir，此处遗漏）。
+        report_path = Path(args.report)
+        report_path.parent.mkdir(parents=True, exist_ok=True)
+        report_path.write_text(
             json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8"
         )
         print(f"[完成] 已写出运行报告：{args.report}")

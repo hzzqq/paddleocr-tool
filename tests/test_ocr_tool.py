@@ -1763,3 +1763,53 @@ def test_skip_existing_without_state_falls_back_to_stem(tmp_path):
     out.mkdir()
     (out / "x.md").write_text("legacy", encoding="utf-8")
     assert ocr_tool._output_exists(out, tmp_path / "anywhere" / "x.png", "md", done=set()) is True
+
+
+def _mk_result(name, text="内容", status="ok"):
+    return {"file": str(name), "text": text, "chars": len(text), "elapsed": 0.1,
+            "status": status, "error": "", "avg_conf": None, "min_conf": None}
+
+
+def test_write_outputs_rerewrite_is_idempotent(tmp_path):
+    """R2 修复（c168）：--skip-existing 续跑重写必须幂等——连续两轮写出同一
+    结果，产物文件数不变（原实现每轮经 _unique_path 顺延 _2/_3/_N，磁盘膨胀）。"""
+    results = [_mk_result(tmp_path / "p.png")]
+    ocr_tool.write_outputs(results, tmp_path, "md")
+    assert sorted(f.name for f in tmp_path.glob("*.md")) == ["p.md"]
+    ocr_tool.write_outputs(results, tmp_path, "md")   # 第二轮重写
+    assert sorted(f.name for f in tmp_path.glob("*.md")) == ["p.md"]
+
+
+def test_write_outputs_same_stem_still_suffixed_within_round(tmp_path):
+    """同名 stem 冲突的本轮保护不回退：a/x.png 与 b/x.png 仍分别写 x.md / x_2.md。"""
+    results = [_mk_result(tmp_path / "a" / "x.png"),
+               _mk_result(tmp_path / "b" / "x.png")]
+    ocr_tool.write_outputs(results, tmp_path, "md")
+    names = sorted(f.name for f in tmp_path.glob("*.md"))
+    assert names == ["x.md", "x_2.md"]
+
+
+def test_report_parent_dir_auto_created(tmp_path, monkeypatch, capsys):
+    """R2 修复（c168）：--report 指向不存在父目录时应自动创建并写出，
+    而非在全部 OCR 完成后裸抛 FileNotFoundError（CI 误判整批失败）。"""
+    inp = tmp_path / "in"
+    inp.mkdir()
+    (inp / "a.png").write_bytes(b"png")
+    out = tmp_path / "out"
+    rpt = tmp_path / "nested" / "deep" / "rep.json"
+    rc = ocr_tool.main([
+        "--input", str(inp), "--output", str(out), "--mock",
+        "--report", str(rpt),
+    ])
+    assert rc == 0
+    assert rpt.exists()
+
+
+def test_write_outputs_tolerates_sparse_previous_records(tmp_path):
+    """R2 修复（c168）：旧版本/手工编辑的 results.json 缺字段时不得裸崩
+    （原 r["text"]/r["elapsed"] 直接下标 KeyError、csv extrasaction=raise）。"""
+    results = [{"file": str(tmp_path / "p.png"), "status": "ok"}]  # 缺 text/elapsed 等
+    ocr_tool.write_outputs(results, tmp_path, "md")    # 不应抛
+    assert (tmp_path / "results.json").exists()
+    assert (tmp_path / "results.csv").exists()
+    assert (tmp_path / "p.md").exists()
